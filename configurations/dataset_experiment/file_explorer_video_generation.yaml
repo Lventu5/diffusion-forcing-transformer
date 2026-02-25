@@ -1,0 +1,35 @@
+# @package _global_
+# 2 x A100 80GB — pixel-space, no latents
+
+# Pixel-space 192×256 with 32 frames → 393K tokens/sample (heavy).
+# DiT-B + max_frames=16 is a safe starting point; scale up after verifying no OOM.
+dataset:
+  max_frames: 16   # reduce from 32 to fit pixel-space in VRAM; raise if memory allows
+
+experiment:
+  reload_dataloaders_every_n_epochs: 0   # disable resumable-dataloader mode (requires subdataset_size)
+  training:
+    lr: 1e-4
+    batch_size: 4          # per GPU → effective 8 with 2 GPUs
+    max_epochs: 200
+    optim:
+      accumulate_grad_batches: 4   # effective batch = 32
+      gradient_clip_val: 1.0
+    data:
+      num_workers: 8
+  validation:
+    batch_size: 8
+    data:
+      num_workers: 4
+
+algorithm:
+  diffusion:
+    loss_weighting:
+      strategy: sigmoid
+      sigmoid_bias: -1.0
+    training_schedule:
+      name: cosine
+      shift: 0.125
+  backbone:
+    external_cond_dropout: 0.1
+    use_gradient_checkpointing: True   # saves VRAM at the cost of ~20% speed

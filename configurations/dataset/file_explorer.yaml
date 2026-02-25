@@ -1,0 +1,40 @@
+# Dataset configuration for the file-explorer (ui_sim) trajectories.
+# Data must be built first:  python scripts/build_dfot_dataset.py
+
+defaults:
+  - base_video
+
+# Directory where .npz files are stored (built by scripts/build_dfot_dataset.py).
+save_dir: data/file_explorer
+
+# Target resolution (square side after padding).
+# At resolution=256: resize 1024×768 → 256×192 (no crop), then pad height 192→256.
+# DiT3D requires square inputs (spatial_grid_size = sqrt(num_patches) must be integer).
+resolution: 256
+
+# Actual frame shape after resize + pad: 256×256 square.
+observation_shape: [3, 256, 256]
+
+# Maximum number of frames to load per clip during training.
+max_frames: 32
+
+# Number of context frames provided to the model.
+context_length: 8
+
+# Dimension of the external conditioning vector (9-dim action encoding).
+external_cond_dim: 9
+
+# Mask the conditioning on the first (context) frames so the model learns
+# to generate future frames given only the visual context.
+external_cond_processing: mask_first
+
+# Normalisation: frames are loaded as float32 in [0, 1].
+# mean=0.5 / std=0.5 maps them to [-1, 1], which is standard for diffusion models.
+# Overrides the base_video interpolation "data/${dataset.name}/data_mean.npy"
+# which requires pre-computed per-dataset statistics we don't need here.
+data_mean: 0.5
+data_std: 0.5
+
+# Pixel-space training — no VAE latents.
+latent:
+  enable: false
