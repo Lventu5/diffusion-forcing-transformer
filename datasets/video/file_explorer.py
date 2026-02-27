@@ -2,8 +2,8 @@
 DFoT-compatible dataset for file-explorer (ui_sim) trajectories.
 
 Trajectories are stored as .npz files built by scripts/build_dfot_dataset.py:
-  frames  (T, 768, 1024, 3)  uint8
-  actions (T, 9)             float32
+  frames  (T+1, 768, 1024, 3)  uint8
+  actions (T+1, 3)             float32  — [action_type_idx, x/1024, y/768]
 
 Class hierarchy mirrors the existing Minecraft/RealEstate10K datasets:
   FileExplorerBaseVideoDataset     — shared I/O overrides
@@ -18,7 +18,6 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from omegaconf import DictConfig
 
 from .base_video import (
@@ -121,33 +120,23 @@ class FileExplorerBaseVideoDataset(BaseVideoDataset):
 
     def build_transform(self):
         """
-        Resize so the longer side equals self.resolution (no crop), then
-        zero-pad the shorter side to produce a square frame required by DiT3D.
+        Resize the native 768×1024 frames to 192×256 preserving aspect ratio.
 
         For resolution=256 on 1024×768 input:
-          - resize → 256×192  (W×H, aspect-ratio preserving, no crop)
-          - pad height 192 → 256 (32 px top, 32 px bottom)
-          - output: 256×256
+          scale = 256 / 1024 = 0.25
+          output: H=192, W=256  (no padding, no crop)
         """
         scale = self.resolution / max(_SCREEN_H, _SCREEN_W)
         frame_h = round(_SCREEN_H * scale)   # 192
         frame_w = round(_SCREEN_W * scale)   # 256
-        resize_fn = VideoTransform((frame_h, frame_w))
-        pad_top = (frame_w - frame_h) // 2        # 32
-        pad_bottom = frame_w - frame_h - pad_top  # 32
-
-        def _resize_and_pad(images: torch.Tensor) -> torch.Tensor:
-            images = resize_fn(images)                          # (..., C, 192, 256)
-            return F.pad(images, (0, 0, pad_top, pad_bottom))  # (..., C, 256, 256)
-
-        return _resize_and_pad
+        return VideoTransform((frame_h, frame_w))
 
 
 class FileExplorerAdvancedVideoDataset(
     FileExplorerBaseVideoDataset, BaseAdvancedVideoDataset
 ):
     """
-    File-explorer advanced video dataset with 9-dim action conditioning.
+    File-explorer advanced video dataset with 3-dim action conditioning.
 
     The action vector is already in the correct float32 format inside the .npz,
     so load_cond simply returns the pre-encoded slice as a tensor.
@@ -168,10 +157,10 @@ class FileExplorerAdvancedVideoDataset(
         end_frame: int,
     ) -> torch.Tensor:
         """
-        Return the pre-encoded action slice as a (T, 9) float32 tensor.
+        Return the pre-encoded action slice as a (T, 3) float32 tensor.
         """
         actions: np.ndarray = np.load(video_metadata["video_paths"])["actions"]
-        actions = actions[start_frame:end_frame]  # (T, 9) float32
+        actions = actions[start_frame:end_frame]  # (T, 3) float32
         return torch.from_numpy(actions).float()
 
 

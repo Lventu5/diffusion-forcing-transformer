@@ -11,6 +11,7 @@ from ..backbones import (
     DiT3DPose,
     UViT3D,
     UViT3DPose,
+    UViT3DAction,
 )
 from .noise_schedule import make_beta_schedule
 
@@ -60,6 +61,8 @@ class DiscreteDiffusion(nn.Module):
                 model_cls = Unet3D
             case "u_vit3d":
                 model_cls = UViT3D
+            case "uvit3d_action":
+                model_cls = UViT3DAction
             case "u_vit3d_pose":
                 model_cls = UViT3DPose
             case "dit3d":

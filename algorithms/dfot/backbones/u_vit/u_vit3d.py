@@ -97,10 +97,11 @@ class UViT3D(BaseBackbone):
             else:
                 pos_emb_cls = partial(SinusoidalPositionalEmbedding, learnable=True)
                 dim = channel
-            level_resolution = resolution // patch_size // (2**i_level)
+            level_h = x_shape[-2] // patch_size // (2**i_level)
+            level_w = x_shape[-1] // patch_size // (2**i_level)
             self.pos_embs[f"{i_level}"] = pos_emb_cls(
                 dim,
-                (self.temporal_length, level_resolution, level_resolution),
+                (self.temporal_length, level_h, level_w),
             )
 
         def _rope_kwargs(i_level: int):
@@ -230,7 +231,8 @@ class UViT3D(BaseBackbone):
         is_transformer = self.is_transformers[i_level]
         if not is_transformer:
             return x
-        h = w = int((x.shape[1] / self.temporal_length) ** 0.5)
+        h = self.x_shape[-2] // self.cfg.patch_size // (2 ** i_level)
+        w = self.x_shape[-1] // self.cfg.patch_size // (2 ** i_level)
         x = rearrange(x, "b (t h w) c -> (b t) c h w", t=self.temporal_length, h=h, w=w)
         return x
 

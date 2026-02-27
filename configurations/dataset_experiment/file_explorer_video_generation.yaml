@@ -1,8 +1,6 @@
 # @package _global_
-# 2 x A100 80GB — pixel-space, no latents
+# 2 x A100 80GB — pixel-space, no latents, UVit3D backbone with action embedding
 
-# Pixel-space 192×256 with 32 frames → 393K tokens/sample (heavy).
-# DiT-B + max_frames=16 is a safe starting point; scale up after verifying no OOM.
 dataset:
   max_frames: 16   # reduce from 32 to fit pixel-space in VRAM; raise if memory allows
 
@@ -31,5 +29,7 @@ algorithm:
       name: cosine
       shift: 0.125
   backbone:
+    name: uvit3d_action
     external_cond_dropout: 0.1
-    use_gradient_checkpointing: True   # saves VRAM at the cost of ~20% speed
+    # UVit3D checkpointing is controlled per-level via use_checkpointing list in
+    # configurations/algorithm/backbone/uvit3d_action.yaml
