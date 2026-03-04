@@ -29,12 +29,10 @@ external_cond_dim: 3
 # to generate future frames given only the visual context.
 external_cond_processing: mask_first
 
-# Normalisation: frames are loaded as float32 in [0, 1].
-# mean=0.5 / std=0.5 maps them to [-1, 1], which is standard for diffusion models.
-# Overrides the base_video interpolation "data/${dataset.name}/data_mean.npy"
-# which requires pre-computed per-dataset statistics we don't need here.
-data_mean: 0.5
-data_std: 0.5
+# Normalisation: frames are loaded as float32 in [0, 1] by dividing uint8 values
+# by 255. No further normalisation is applied (mean=0, std=1 → identity transform).
+data_mean: 0.0
+data_std: 1.0
 
 # Pixel-space training — no VAE latents.
 latent:
