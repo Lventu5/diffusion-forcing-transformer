@@ -3,6 +3,8 @@ from functools import partial
 from omegaconf import DictConfig
 import numpy as np
 import torch
+import lovely_tensors as lt
+lt.monkey_patch()
 import torch.distributed
 import torch.nn.functional as F
 from torch import Tensor
@@ -283,6 +285,11 @@ class DFoTVideo(BasePytorchAlgo):
         else:
             xs = batch["videos"]
         xs = self._normalize_x(xs)
+
+        # DEBUG: print stats of xs after normalization, before network input
+        if not getattr(self, "_debug_printed_xs", False):
+            print("[DEBUG] xs after _normalize_x (before diffusion model):", xs)
+            self._debug_printed_xs = True
 
         # 2. Prepare external conditions
         conditions = batch.get("conds", None)

@@ -2,6 +2,8 @@ from typing import Optional, Tuple
 from functools import partial
 from omegaconf import DictConfig
 import torch
+import lovely_tensors as lt
+lt.monkey_patch()
 from torch import nn, Tensor
 from torch.utils.checkpoint import checkpoint
 from einops import rearrange, repeat
@@ -302,6 +304,12 @@ class UViT3D(BaseBackbone):
         assert (
             x.shape[1] == self.temporal_length
         ), f"Temporal length of U-ViT is set to {self.temporal_length}, but input has temporal length {x.shape[1]}."
+
+        # DEBUG: print stats of x at UViT3D input, once per run
+        if not getattr(self, "_debug_printed_input", False):
+            print("[DEBUG] UViT3D input x:", x)
+            self._debug_printed_input = True
+
         x = rearrange(x, "b t c h w -> (b t) c h w")
         x = self.embed_input(x)
 
@@ -334,4 +342,11 @@ class UViT3D(BaseBackbone):
             x = self._run_level(x, emb, i_level, is_up=True)
 
         x = self.project_output(x)
-        return rearrange(x, "(b t) c h w -> b t c h w", t=self.temporal_length)
+        out = rearrange(x, "(b t) c h w -> b t c h w", t=self.temporal_length)
+
+        # DEBUG: print stats of UViT3D output, once per run
+        if not getattr(self, "_debug_printed_output", False):
+            print("[DEBUG] UViT3D output:", out)
+            self._debug_printed_output = True
+
+        return out
