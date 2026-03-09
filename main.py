@@ -14,6 +14,7 @@ import subprocess
 import time
 from pathlib import Path
 
+import torch
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from omegaconf.omegaconf import open_dict

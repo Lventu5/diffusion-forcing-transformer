@@ -19,6 +19,7 @@ experiment:
     batch_size: 8
     val_every_n_epoch: 10   # validate every 10 epochs to avoid ~3h/epoch validation overhead
     limit_batch: 0.2        # use 20% of validation data (~30 videos)
+    precision: bf16-mixed   # fp16 overflows at high noise levels during denoising
     data:
       num_workers: 4
 
