@@ -129,17 +129,17 @@ class BaseLightningExperiment(BaseExperiment):
         if self.logger:
             callbacks.append(LearningRateMonitor("step", True))
         if "checkpointing" in self.cfg.training:
-            callbacks.append(
-                ModelCheckpoint(
-                    pathlib.Path(
-                        hydra.core.hydra_config.HydraConfig.get()["runtime"][
-                            "output_dir"
-                        ]
-                    )
-                    / "checkpoints",
-                    **self.cfg.training.checkpointing,
+            ckpt_dir = (
+                pathlib.Path(
+                    hydra.core.hydra_config.HydraConfig.get()["runtime"]["output_dir"]
                 )
+                / "checkpoints"
             )
+            ckpt_cfgs = self.cfg.training.checkpointing
+            if not isinstance(ckpt_cfgs, list):
+                ckpt_cfgs = [ckpt_cfgs]
+            for ckpt_cfg in ckpt_cfgs:
+                callbacks.append(ModelCheckpoint(ckpt_dir, **ckpt_cfg))
         callbacks += self._build_common_callbacks()
 
         trainer = pl.Trainer(
