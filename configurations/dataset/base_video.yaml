@@ -6,6 +6,8 @@ defaults:
 
 # Directory where the dataset is stored
 save_dir: ???
+# Directory where dataset metadata is cached (must be writable; defaults to save_dir/metadata)
+metadata_dir: null
 # Mean & Std to be used for normalizing inputs to the model
 data_mean: "data/${dataset.name}/data_mean.npy"
 data_std: "data/${dataset.name}/data_std.npy"

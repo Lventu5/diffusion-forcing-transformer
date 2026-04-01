@@ -1,33 +1,26 @@
 # @package _global_
-# 2 x A100 80GB — pixel-space, no latents, UVit3D backbone with action embedding
-
-dataset:
-  max_frames: 16   # reduce from 32 to fit pixel-space in VRAM; raise if memory allows
 
 experiment:
-  reload_dataloaders_every_n_epochs: 0   # disable resumable-dataloader mode (requires subdataset_size)
+  reload_dataloaders_every_n_epochs: 1
   training:
     lr: 1e-4
-    batch_size: 4          # per GPU → effective 8 with 2 GPUs
+    batch_size: 8
     max_epochs: 200
     checkpointing:
-      every_n_train_steps: 5000
+      every_n_train_steps: 1000
       every_n_epochs: null
-    checkpointing_epoch:
-      every_n_train_steps: null
-      every_n_epochs: 1
     optim:
-      accumulate_grad_batches: 4   # effective batch = 32
+      accumulate_grad_batches: 1
       gradient_clip_val: 1.0
     data:
-      num_workers: 8
+      num_workers: 11
   validation:
-    batch_size: 8
-    val_every_n_epoch: 10   # validate every 10 epochs to avoid ~3h/epoch validation overhead
-    limit_batch: 0.2        # use 20% of validation data (~30 videos)
+    batch_size: 16
+    val_every_n_epoch: 1
+    limit_batch: 1.0
     precision: bf16-mixed   # fp16 overflows at high noise levels during denoising
     data:
-      num_workers: 4
+      num_workers: 1
 
 algorithm:
   diffusion:

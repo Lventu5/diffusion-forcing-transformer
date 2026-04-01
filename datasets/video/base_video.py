@@ -48,7 +48,7 @@ class BaseVideoDataset(torch.utils.data.Dataset, ABC):
             f"{self.save_dir.name}_latent_{self.latent_resolution}{'_' + cfg.latent.suffix if cfg.latent.suffix else ''}"
         )
         self.split_dir = self.save_dir / split
-        self.metadata_dir = self.save_dir / "metadata"
+        self.metadata_dir = Path(cfg.metadata_dir) if cfg.metadata_dir else self.save_dir / "metadata"
 
         # Download dataset if not exists
         if self._should_download():
