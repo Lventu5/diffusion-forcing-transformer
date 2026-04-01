@@ -13,12 +13,17 @@ Class hierarchy mirrors the existing Minecraft/RealEstate10K datasets:
 
 from __future__ import annotations
 
+import os
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
+from filelock import FileLock
 from omegaconf import DictConfig
+from tqdm.auto import tqdm
 
 from .base_video import (
     BaseAdvancedVideoDataset,
@@ -27,10 +32,23 @@ from .base_video import (
     SPLIT,
 )
 from .utils import VideoTransform
+from utils.distributed_utils import rank_zero_print
+from utils.print_utils import cyan
 
 # Native screen resolution of all recorded trajectories.
 _SCREEN_H: int = 768
 _SCREEN_W: int = 1024
+
+
+def _read_npz_frames_length(npz_path: Path) -> int:
+    """Read the leading time dimension from frames.npy without loading the array."""
+    try:
+        with zipfile.ZipFile(npz_path) as zf, zf.open("frames.npy") as fp:
+            version = np.lib.format.read_magic(fp)
+            shape, _, _ = np.lib.format._read_array_header(fp, version)
+            return int(shape[0])
+    except Exception:
+        return 0
 
 
 class FileExplorerBaseVideoDataset(BaseVideoDataset):
@@ -67,13 +85,21 @@ class FileExplorerBaseVideoDataset(BaseVideoDataset):
             return
 
         video_paths = sorted(split_dir.glob("*.npz"), key=str)
-        lengths: List[int] = []
-        for p in video_paths:
-            try:
-                data = np.load(p)
-                lengths.append(int(data["frames"].shape[0]))
-            except Exception:
-                lengths.append(0)
+        num_workers = min(len(video_paths), os.cpu_count() or 1, 16) or 1
+        rank_zero_print(
+            cyan(
+                f"Building {split} metadata from {len(video_paths)} trajectories "
+                f"with {num_workers} workers"
+            )
+        )
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            lengths = list(
+                tqdm(
+                    executor.map(_read_npz_frames_length, video_paths),
+                    total=len(video_paths),
+                    desc=f"Metadata[{split}]",
+                )
+            )
 
         torch.save(
             {"video_paths": video_paths, "lengths": lengths},
@@ -84,7 +110,10 @@ class FileExplorerBaseVideoDataset(BaseVideoDataset):
         metadata_path = self.metadata_dir / f"{self.split}.pt"
         if not metadata_path.exists():
             self.metadata_dir.mkdir(exist_ok=True, parents=True)
-            self.build_metadata(self.split)
+            lock = FileLock(str(metadata_path) + ".lock")
+            with lock:
+                if not metadata_path.exists():
+                    self.build_metadata(self.split)
         saved = torch.load(metadata_path, weights_only=False)
         return [
             {
@@ -162,6 +191,27 @@ class FileExplorerAdvancedVideoDataset(
         actions: np.ndarray = np.load(video_metadata["video_paths"])["actions"]
         actions = actions[start_frame:end_frame]  # (T, 3) float32
         return torch.from_numpy(actions).float()
+
+    def load_video_and_cond(
+        self,
+        video_metadata: Dict[str, Any],
+        start_frame: int,
+        end_frame: Optional[int] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Load frames and actions from the same .npz once.
+
+        The default base implementation calls load_video() and load_cond()
+        separately, which re-opens and decompresses the archive twice.
+        """
+        with np.load(video_metadata["video_paths"]) as data:
+            frames = data["frames"][start_frame:end_frame]
+            actions = data["actions"][start_frame:end_frame]
+
+        video = torch.from_numpy(frames.astype(np.float32) / 255.0)
+        video = video.permute(0, 3, 1, 2).contiguous()
+        cond = torch.from_numpy(actions).float()
+        return video, cond
 
 
 class FileExplorerSimpleVideoDataset(

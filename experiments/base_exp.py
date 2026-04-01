@@ -12,6 +12,7 @@ import pathlib
 import hydra
 import torch
 from lightning.pytorch.strategies.ddp import DDPStrategy
+from lightning.pytorch.plugins.environments import LightningEnvironment
 
 import lightning.pytorch as pl
 from lightning.pytorch.loggers.wandb import WandbLogger
@@ -116,6 +117,17 @@ class BaseLightningExperiment(BaseExperiment):
     def _build_common_callbacks(self):
         return [EMA(**self.cfg.ema)]
 
+    def _build_strategy(self):
+        if torch.cuda.device_count() <= 1:
+            return "auto"
+
+        strategy_kwargs = {
+            "find_unused_parameters": self.cfg.find_unused_parameters,
+        }
+        if self.cfg.num_nodes == 1:
+            strategy_kwargs["cluster_environment"] = LightningEnvironment()
+        return DDPStrategy(**strategy_kwargs)
+
     def training(self) -> None:
         """
         All training happens here
@@ -146,11 +158,7 @@ class BaseLightningExperiment(BaseExperiment):
             logger=self.logger,
             devices="auto",
             num_nodes=self.cfg.num_nodes,
-            strategy=(
-                DDPStrategy(find_unused_parameters=self.cfg.find_unused_parameters)
-                if torch.cuda.device_count() > 1
-                else "auto"
-            ),
+            strategy=self._build_strategy(),
             callbacks=callbacks,
             gradient_clip_val=self.cfg.training.optim.gradient_clip_val,
             val_check_interval=self.cfg.validation.val_every_n_step,
@@ -195,11 +203,7 @@ class BaseLightningExperiment(BaseExperiment):
             logger=self.logger,
             devices="auto",
             num_nodes=self.cfg.num_nodes,
-            strategy=(
-                DDPStrategy(find_unused_parameters=self.cfg.find_unused_parameters)
-                if torch.cuda.device_count() > 1
-                else "auto"
-            ),
+            strategy=self._build_strategy(),
             callbacks=callbacks,
             limit_val_batches=self.cfg.validation.limit_batch,
             precision=self.cfg.validation.precision,
@@ -232,11 +236,7 @@ class BaseLightningExperiment(BaseExperiment):
             logger=self.logger,
             devices="auto",
             num_nodes=self.cfg.num_nodes,
-            strategy=(
-                DDPStrategy(find_unused_parameters=self.cfg.find_unused_parameters)
-                if torch.cuda.device_count() > 1
-                else "auto"
-            ),
+            strategy=self._build_strategy(),
             callbacks=callbacks,
             limit_test_batches=self.cfg.test.limit_batch,
             precision=self.cfg.test.precision,
