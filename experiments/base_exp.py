@@ -133,6 +133,10 @@ class BaseLightningExperiment(BaseExperiment):
         if self.cfg.num_nodes == 1:
             strategy_kwargs["cluster_environment"] = LightningEnvironment()
         return DDPStrategy(**strategy_kwargs)
+    
+    def _checkpoint_weights_only(self) -> Optional[bool]:
+        """Trusted local DFoT checkpoints include OmegaConf objects in metadata."""
+        return False if self.ckpt_path is not None else None
 
 
 class EpochProgressLogger(Callback):
@@ -235,6 +239,7 @@ class EpochProgressLogger(Callback):
             self.algo,
             datamodule=self.data_module,
             ckpt_path=self.ckpt_path,
+            weights_only=self._checkpoint_weights_only(),
         )
 
     def validation(self) -> None:
@@ -268,6 +273,7 @@ class EpochProgressLogger(Callback):
             self.algo,
             datamodule=self.data_module,
             ckpt_path=self.ckpt_path,
+            weights_only=self._checkpoint_weights_only(),
         )
 
     def test(self) -> None:
@@ -300,4 +306,5 @@ class EpochProgressLogger(Callback):
             self.algo,
             datamodule=self.data_module,
             ckpt_path=self.ckpt_path,
+            weights_only=self._checkpoint_weights_only(),
         )
