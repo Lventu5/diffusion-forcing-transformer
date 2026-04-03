@@ -4,13 +4,14 @@ experiment:
   reload_dataloaders_every_n_epochs: 1
   training:
     lr: 1e-4
-    batch_size: 8
+    precision: bf16-mixed
+    batch_size: 4
     max_epochs: 200
     checkpointing:
       every_n_train_steps: 1000
       every_n_epochs: null
     optim:
-      accumulate_grad_batches: 1
+      accumulate_grad_batches: 2
       gradient_clip_val: 1.0
     data:
       num_workers: 6
@@ -34,5 +35,6 @@ algorithm:
   backbone:
     name: uvit3d_action
     external_cond_dropout: 0.1
-    # UVit3D checkpointing is controlled per-level via use_checkpointing list in
-    # configurations/algorithm/backbone/uvit3d_action.yaml
+    # Checkpoint only the deepest stage first to reduce activation memory without
+    # paying the full recomputation cost across all levels.
+    use_checkpointing: [false, false, true, true]

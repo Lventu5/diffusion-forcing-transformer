@@ -12,6 +12,7 @@ training:
   compile: False # whether to compile the model with torch.compile
   lr: 0.001 # learning rate
   batch_size: 16 # training batch size; effective batch size is this number * gpu * nodes iff using distributed training
+  progress_log_every_n_steps: 100 # print coarse epoch progress to stdout every n train batches
   max_epochs: 1000 # set to -1 to train forever
   max_steps: -1 # set to -1 to train forever, will override max_epochs
   max_time: null # set to something like "00:12:00:00" to enable

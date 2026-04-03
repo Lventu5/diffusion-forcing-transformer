@@ -16,7 +16,7 @@ from lightning.pytorch.plugins.environments import LightningEnvironment
 
 import lightning.pytorch as pl
 from lightning.pytorch.loggers.wandb import WandbLogger
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks import Callback, LearningRateMonitor, ModelCheckpoint
 
 from omegaconf import DictConfig
 
@@ -115,7 +115,13 @@ class BaseLightningExperiment(BaseExperiment):
         self.data_module = self.data_module_cls(root_cfg, self.compatible_datasets)
 
     def _build_common_callbacks(self):
-        return [EMA(**self.cfg.ema)]
+        callbacks = [EMA(**self.cfg.ema)]
+        progress_log_every_n_steps = int(
+            self.cfg.training.get("progress_log_every_n_steps", 0)
+        )
+        if progress_log_every_n_steps > 0:
+            callbacks.append(EpochProgressLogger(progress_log_every_n_steps))
+        return callbacks
 
     def _build_strategy(self):
         if torch.cuda.device_count() <= 1:
@@ -127,6 +133,50 @@ class BaseLightningExperiment(BaseExperiment):
         if self.cfg.num_nodes == 1:
             strategy_kwargs["cluster_environment"] = LightningEnvironment()
         return DDPStrategy(**strategy_kwargs)
+
+
+class EpochProgressLogger(Callback):
+    """Logs coarse epoch progress to stdout so it shows up in Slurm logs."""
+
+    def __init__(self, every_n_train_batches: int = 100) -> None:
+        super().__init__()
+        self.every_n_train_batches = max(1, int(every_n_train_batches))
+
+    @staticmethod
+    def _format_total_batches(total_batches) -> str:
+        if total_batches in (None, float("inf")):
+            return "?"
+        return str(int(total_batches))
+
+    def on_train_epoch_start(self, trainer, pl_module) -> None:
+        max_epochs = trainer.max_epochs if trainer.max_epochs != -1 else "?"
+        rank_zero_print(
+            cyan("Train epoch:"),
+            f"{trainer.current_epoch}/{max_epochs} "
+            f"({self._format_total_batches(trainer.num_training_batches)} batches)",
+        )
+
+    def on_train_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx
+    ) -> None:
+        total_batches = trainer.num_training_batches
+        if total_batches in (None, 0, float("inf")):
+            return
+
+        current_batch = batch_idx + 1
+        is_last = current_batch >= total_batches
+        if (
+            current_batch == 1
+            or current_batch % self.every_n_train_batches == 0
+            or is_last
+        ):
+            pct = 100.0 * current_batch / total_batches
+            rank_zero_print(
+                cyan("Train progress:"),
+                f"epoch {trainer.current_epoch} "
+                f"batch {current_batch}/{int(total_batches)} "
+                f"({pct:.1f}%) global_step {trainer.global_step}",
+            )
 
     def training(self) -> None:
         """
