@@ -138,50 +138,6 @@ class BaseLightningExperiment(BaseExperiment):
         """Trusted local DFoT checkpoints include OmegaConf objects in metadata."""
         return False if self.ckpt_path is not None else None
 
-
-class EpochProgressLogger(Callback):
-    """Logs coarse epoch progress to stdout so it shows up in Slurm logs."""
-
-    def __init__(self, every_n_train_batches: int = 100) -> None:
-        super().__init__()
-        self.every_n_train_batches = max(1, int(every_n_train_batches))
-
-    @staticmethod
-    def _format_total_batches(total_batches) -> str:
-        if total_batches in (None, float("inf")):
-            return "?"
-        return str(int(total_batches))
-
-    def on_train_epoch_start(self, trainer, pl_module) -> None:
-        max_epochs = trainer.max_epochs if trainer.max_epochs != -1 else "?"
-        rank_zero_print(
-            cyan("Train epoch:"),
-            f"{trainer.current_epoch}/{max_epochs} "
-            f"({self._format_total_batches(trainer.num_training_batches)} batches)",
-        )
-
-    def on_train_batch_end(
-        self, trainer, pl_module, outputs, batch, batch_idx
-    ) -> None:
-        total_batches = trainer.num_training_batches
-        if total_batches in (None, 0, float("inf")):
-            return
-
-        current_batch = batch_idx + 1
-        is_last = current_batch >= total_batches
-        if (
-            current_batch == 1
-            or current_batch % self.every_n_train_batches == 0
-            or is_last
-        ):
-            pct = 100.0 * current_batch / total_batches
-            rank_zero_print(
-                cyan("Train progress:"),
-                f"epoch {trainer.current_epoch} "
-                f"batch {current_batch}/{int(total_batches)} "
-                f"({pct:.1f}%) global_step {trainer.global_step}",
-            )
-
     def training(self) -> None:
         """
         All training happens here
@@ -308,3 +264,47 @@ class EpochProgressLogger(Callback):
             ckpt_path=self.ckpt_path,
             weights_only=self._checkpoint_weights_only(),
         )
+
+
+class EpochProgressLogger(Callback):
+    """Logs coarse epoch progress to stdout so it shows up in Slurm logs."""
+
+    def __init__(self, every_n_train_batches: int = 100) -> None:
+        super().__init__()
+        self.every_n_train_batches = max(1, int(every_n_train_batches))
+
+    @staticmethod
+    def _format_total_batches(total_batches) -> str:
+        if total_batches in (None, float("inf")):
+            return "?"
+        return str(int(total_batches))
+
+    def on_train_epoch_start(self, trainer, pl_module) -> None:
+        max_epochs = trainer.max_epochs if trainer.max_epochs != -1 else "?"
+        rank_zero_print(
+            cyan("Train epoch:"),
+            f"{trainer.current_epoch}/{max_epochs} "
+            f"({self._format_total_batches(trainer.num_training_batches)} batches)",
+        )
+
+    def on_train_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx
+    ) -> None:
+        total_batches = trainer.num_training_batches
+        if total_batches in (None, 0, float("inf")):
+            return
+
+        current_batch = batch_idx + 1
+        is_last = current_batch >= total_batches
+        if (
+            current_batch == 1
+            or current_batch % self.every_n_train_batches == 0
+            or is_last
+        ):
+            pct = 100.0 * current_batch / total_batches
+            rank_zero_print(
+                cyan("Train progress:"),
+                f"epoch {trainer.current_epoch} "
+                f"batch {current_batch}/{int(total_batches)} "
+                f"({pct:.1f}%) global_step {trainer.global_step}",
+            )

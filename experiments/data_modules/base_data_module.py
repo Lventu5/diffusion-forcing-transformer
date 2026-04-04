@@ -38,6 +38,7 @@ class BaseDataModule(pl.LightningDataModule):
             num_workers=self._get_num_workers(split_cfg.data.num_workers),
             shuffle=self._get_shuffle(dataset, split_cfg.data.shuffle),
             persistent_workers=split == "training",
+            pin_memory=True,
             worker_init_fn=lambda worker_id: (
                 dataset.worker_init_fn(worker_id)
                 if hasattr(dataset, "worker_init_fn")
