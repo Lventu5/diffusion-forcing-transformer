@@ -17,7 +17,7 @@ experiment:
       num_workers: 16
   validation:
     batch_size: 16
-    val_every_n_step: 10000
+    val_every_n_step: 20000
     val_every_n_epoch: null
     limit_batch: 1.0
     precision: bf16-mixed   # fp16 overflows at high noise levels during denoising
@@ -38,4 +38,4 @@ algorithm:
     external_cond_dropout: 0.1
     # Checkpoint only the deepest stage first to reduce activation memory without
     # paying the full recomputation cost across all levels.
-    use_checkpointing: [false, false, true, true]
+    use_checkpointing: [false, false, false, false]
