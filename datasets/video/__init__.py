@@ -16,3 +16,7 @@ from .file_explorer import (
     FileExplorerAdvancedVideoDataset,
     FileExplorerSimpleVideoDataset,
 )
+from .file_explorer_node_cond import (
+    FileExplorerNodeCondAdvancedVideoDataset,
+    FileExplorerNodeCondSimpleVideoDataset,
+)

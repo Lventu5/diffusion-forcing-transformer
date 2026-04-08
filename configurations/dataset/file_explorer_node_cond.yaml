@@ -1,0 +1,39 @@
+# Dataset configuration for file-explorer trajectories conditioned on both
+# actions AND precomputed node-structure embeddings.
+#
+# Prerequisites:
+#   python scripts/precompute_node_embeddings.py \
+#       --processed-dir data/processed/<dataset> \
+#       --raw-data-dir  /work/$USER/data/dataset_compact
+#
+# This config is otherwise identical to file_explorer.yaml.  The only
+# additions are node_emb_dim and the correspondingly larger external_cond_dim.
+
+defaults:
+  - file_explorer   # inherits all file_explorer settings as base
+
+# Override save_dir if needed; defaults to file_explorer value (data/file_explorer).
+# Uncomment and set if your processed data lives elsewhere:
+# save_dir: data/file_explorer
+
+resolution: 256
+observation_shape: [3, 192, 256]
+max_frames: 32
+context_length: 8
+
+# Dimension of the precomputed node embedding.
+# Must match the sentence-transformer model used during precomputation:
+#   all-mpnet-base-v2  → 768
+#   all-MiniLM-L6-v2  → 384
+node_emb_dim: 768
+
+# Total conditioning dimension: action (3) + node embedding (768).
+external_cond_dim: 771
+
+external_cond_processing: mask_first
+
+data_mean: 0.5
+data_std: 0.5
+
+latent:
+  enable: false

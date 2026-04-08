@@ -1,0 +1,45 @@
+# @package _global_
+# Experiment config for file-explorer DFoT training conditioned on both
+# actions and precomputed node-structure embeddings (graph conditioning).
+#
+# Differences from file_explorer_video_generation.yaml:
+#   - Uses uvit3d_action_node backbone instead of uvit3d_action
+#   - All other hyperparameters are kept identical for fair comparison
+
+experiment:
+  reload_dataloaders_every_n_epochs: 1
+  training:
+    lr: 1e-4
+    precision: bf16-mixed
+    batch_size: 4
+    max_epochs: 200
+    checkpointing:
+      every_n_train_steps: 1000
+      every_n_epochs: null
+    optim:
+      accumulate_grad_batches: 2
+      gradient_clip_val: 1.0
+    data:
+      num_workers: 16
+  validation:
+    batch_size: 16
+    val_every_n_step: 20000
+    val_every_n_epoch: null
+    limit_batch: 1.0
+    precision: bf16-mixed
+    num_sanity_val_steps: 0
+    data:
+      num_workers: 16
+
+algorithm:
+  diffusion:
+    loss_weighting:
+      strategy: sigmoid
+      sigmoid_bias: -1.0
+    training_schedule:
+      name: cosine
+      shift: 0.125
+  backbone:
+    name: uvit3d_action_node
+    external_cond_dropout: 0.1
+    use_checkpointing: [false, false, false, false]

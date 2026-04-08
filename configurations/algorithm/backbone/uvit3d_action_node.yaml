@@ -1,0 +1,22 @@
+# UViT3DActionNode: identical architecture to uvit3d_action but uses
+# ActionNodeCondEmbedding to handle both action (3-dim) and precomputed
+# node-structure embedding (e.g. 768-dim from all-mpnet-base-v2).
+#
+# Set dataset.external_cond_dim = 3 + <node_embedding_dim>  (e.g. 771 for 768-dim).
+name: uvit3d_action_node
+channels: [128, 256, 512, 1024]
+emb_channels: 1024
+patch_size: 2
+block_types: ["ResBlock", "ResBlock", "TransformerBlock", "TransformerBlock"]
+block_dropouts: [0.0, 0.0, 0.1, 0.1]
+num_updown_blocks: [3, 3, 3]
+num_mid_blocks: 16
+num_heads: 4
+pos_emb_type: rope
+use_checkpointing: [false, false, false, false]
+# Action conditioning dropout (inherited key, same as uvit3d_action).
+# Set in dataset_experiment config via algorithm.backbone.external_cond_dropout.
+external_cond_dropout: 0.1
+# Node-structure conditioning dropout — tunable independently.
+# Set higher if the node signal is too dominant; set to 0 to disable.
+node_cond_dropout: 0.1
