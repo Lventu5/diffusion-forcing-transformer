@@ -1,15 +1,18 @@
 from typing import Literal, List, Dict, Any, Callable, Tuple, Optional
 from abc import ABC, abstractmethod
+import os
 import random
 import bisect
+import time
 from pathlib import Path
 from omegaconf import DictConfig
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torchvision.datasets.video_utils import _VideoTimestampsDataset, _collate_fn
 from tqdm import tqdm
 from einops import rearrange
-from utils.distributed_utils import rank_zero_print
+from utils.distributed_utils import rank_zero_print, is_rank_zero
 from utils.print_utils import cyan
 from datasets.video.utils import read_video, VideoTransform
 
@@ -31,6 +34,9 @@ class BaseVideoDataset(torch.utils.data.Dataset, ABC):
     """
 
     _ALL_SPLITS = ["training", "validation", "test"]
+    _METADATA_LOCK_NAME = ".build.lock"
+    _METADATA_WAIT_INTERVAL_SEC = 1.0
+    _METADATA_WAIT_TIMEOUT_SEC = 600.0
     metadata: Dict[str, Any]
 
     def __init__(
@@ -53,10 +59,7 @@ class BaseVideoDataset(torch.utils.data.Dataset, ABC):
         # Download dataset if not exists
         if self._should_download():
             self.download_dataset()
-        if not self.metadata_dir.exists():
-            self.metadata_dir.mkdir(exist_ok=True, parents=True)
-            for split in self._ALL_SPLITS:
-                self.build_metadata(split)
+        self.ensure_metadata()
 
         self.metadata = self.load_metadata()
         self.augment_dataset()
@@ -115,7 +118,80 @@ class BaseVideoDataset(torch.utils.data.Dataset, ABC):
             "video_pts": video_pts,
             "video_fps": video_fps,
         }
-        torch.save(metadata, self.metadata_dir / f"{split}.pt")
+        target_path = self.metadata_dir / f"{split}.pt"
+        tmp_path = self.metadata_dir / f".{split}.pt.tmp.{os.getpid()}"
+        torch.save(metadata, tmp_path)
+        os.replace(tmp_path, target_path)
+
+    def _metadata_file(self, split: SPLIT) -> Path:
+        return self.metadata_dir / f"{split}.pt"
+
+    def _missing_metadata_splits(self) -> List[SPLIT]:
+        return [
+            split
+            for split in self._ALL_SPLITS
+            if not self._metadata_file(split).exists()
+        ]
+
+    def _wait_for_metadata(
+        self, missing_splits: List[SPLIT], lock_path: Path
+    ) -> None:
+        timeout_at = time.monotonic() + self._METADATA_WAIT_TIMEOUT_SEC
+        missing = missing_splits
+        while missing and time.monotonic() < timeout_at:
+            if not lock_path.exists():
+                return
+            time.sleep(self._METADATA_WAIT_INTERVAL_SEC)
+            missing = self._missing_metadata_splits()
+        if missing:
+            missing_str = ", ".join(missing)
+            raise FileNotFoundError(
+                f"Timed out waiting for dataset metadata in {self.metadata_dir}. "
+                f"Missing split files: {missing_str}"
+            )
+
+    def ensure_metadata(self) -> None:
+        """
+        Ensure metadata exists for every configured split.
+
+        Uses a filesystem lock so concurrent workers do not race during startup.
+        """
+        self.metadata_dir.mkdir(exist_ok=True, parents=True)
+        lock_path = self.metadata_dir / self._METADATA_LOCK_NAME
+        warned_about_wait = False
+
+        while True:
+            missing_splits = self._missing_metadata_splits()
+            if not missing_splits:
+                return
+
+            try:
+                os.mkdir(lock_path)
+                have_lock = True
+            except FileExistsError:
+                have_lock = False
+
+            if have_lock:
+                try:
+                    rank_zero_print(
+                        cyan(
+                            f"Building dataset metadata in {self.metadata_dir} "
+                            f"for missing splits: {', '.join(missing_splits)}"
+                        )
+                    )
+                    for split in missing_splits:
+                        if not self._metadata_file(split).exists():
+                            self.build_metadata(split)
+                finally:
+                    os.rmdir(lock_path)
+                continue
+
+            if not warned_about_wait and (not dist.is_initialized() or is_rank_zero):
+                rank_zero_print(
+                    cyan(f"Waiting for metadata to be built in {self.metadata_dir}")
+                )
+                warned_about_wait = True
+            self._wait_for_metadata(missing_splits, lock_path)
 
     def subsample(
         self,

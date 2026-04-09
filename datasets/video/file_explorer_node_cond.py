@@ -29,6 +29,8 @@ from typing import Any, Dict, Optional
 
 import torch
 from omegaconf import DictConfig
+from utils.distributed_utils import rank_zero_print
+from utils.print_utils import cyan
 
 from .file_explorer import (
     FileExplorerAdvancedVideoDataset,
@@ -63,21 +65,33 @@ class FileExplorerNodeCondAdvancedVideoDataset(FileExplorerAdvancedVideoDataset)
         super().__init__(cfg, split, current_epoch)
 
     def on_before_prepare_clips(self) -> None:
-        """Verify that every trajectory has a companion _node_emb.pt file."""
+        """
+        Drop trajectories that are missing a companion _node_emb.pt file.
+
+        A small number of raw trajectories may be missing the upstream
+        node-action-map artifacts, which means precomputation cannot emit an
+        embedding file for them. Excluding those samples keeps training from
+        crashing on startup while still surfacing the data issue clearly.
+        """
         super().on_before_prepare_clips()
         missing: list[str] = []
+        kept: list[Dict[str, Any]] = []
         for vm in self.metadata:
             mp4_path = Path(vm["video_paths"])
-            if not _node_emb_path(mp4_path).exists():
+            if _node_emb_path(mp4_path).exists():
+                kept.append(vm)
+            else:
                 missing.append(str(mp4_path))
         if missing:
             n = len(missing)
             examples = "\n  ".join(missing[:5])
-            raise FileNotFoundError(
-                f"{n} trajectory/ies are missing _node_emb.pt companion files.\n"
-                f"First {min(n, 5)}:\n  {examples}\n\n"
-                "Run scripts/precompute_node_embeddings.py first."
+            rank_zero_print(
+                cyan(
+                    f"Excluding {n} trajectory/ies that are missing _node_emb.pt "
+                    f"companion files.\nFirst {min(n, 5)}:\n  {examples}"
+                )
             )
+            self.metadata = kept
 
     def load_cond(
         self,
@@ -96,7 +110,16 @@ class FileExplorerNodeCondAdvancedVideoDataset(FileExplorerAdvancedVideoDataset)
         # Node embedding slice — shape (T, node_emb_dim)
         mp4_path = Path(video_metadata["video_paths"])
         emb_file = _node_emb_path(mp4_path)
-        node_emb = torch.load(emb_file, weights_only=True)[start_frame:end_frame]
+        node_emb = torch.load(emb_file, weights_only=True)
+
+        # Legacy support: older precompute runs emitted one embedding per
+        # transition instead of one per frame, missing only the initial state.
+        # Duplicate the first embedding so frames 1..T stay aligned and the
+        # initial frame gets the best available approximation.
+        if node_emb.shape[0] + 1 == self.video_length(video_metadata):
+            node_emb = torch.cat([node_emb[:1], node_emb], dim=0)
+
+        node_emb = node_emb[start_frame:end_frame]
 
         # Sanity check (should not happen if on_before_prepare_clips ran)
         if node_emb.shape[0] != action.shape[0]:
