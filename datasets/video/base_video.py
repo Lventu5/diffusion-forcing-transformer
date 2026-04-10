@@ -643,6 +643,13 @@ class BaseAdvancedVideoDataset(BaseVideoDataset):
             "conds": cond,
             "nonterminal": nonterminal,
         }
+        if self.cfg.get("include_clip_metadata", False):
+            output["clip_metadata"] = {
+                "video_path": str(video_metadata["video_paths"]),
+                "start_frame": start_frame,
+                "end_frame": end_frame,
+                "frame_skip": self.frame_skip,
+            }
         return {key: value for key, value in output.items() if value is not None}
 
     def _process_external_cond(self, external_cond: torch.Tensor) -> torch.Tensor:

@@ -103,3 +103,4 @@ logging:
   metrics_batch_size: 16
   sanity_generation: False # generate video samples during sanity check
   raw_dir: null
+  omniparser_cache_dir: null # Optional precomputed cache for semantic UI-element metrics during validation

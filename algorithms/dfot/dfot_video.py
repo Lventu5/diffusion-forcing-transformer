@@ -80,6 +80,8 @@ class DFoTVideo(BasePytorchAlgo):
         ]
         self.num_logged_videos = 0
         self.generator = None
+        self.semantic_metric = None
+        self._semantic_batch_metadata = None
 
         super().__init__(cfg)
 
@@ -149,6 +151,7 @@ class DFoTVideo(BasePytorchAlgo):
                         metric_types,
                         split_batch_size=self.logging.metrics_batch_size,
                     )
+        self._build_semantic_metrics()
 
     def configure_optimizers(self):
         transition_params = list(self.diffusion_model.parameters())
@@ -195,6 +198,18 @@ class DFoTVideo(BasePytorchAlgo):
         Get the appropriate metrics object for the given task.
         """
         return getattr(self, f"metrics_{task}", None)
+
+    def _build_semantic_metrics(self) -> None:
+        cache_dir = self.logging.get("omniparser_cache_dir", None)
+        if cache_dir is None or str(cache_dir).strip() == "":
+            return
+
+        from ui_sim.dfot_simulator.evaluation.dfot_validation_semantics import (
+            DfotSemanticValidationMetric,
+        )
+
+        self.semantic_metric = DfotSemanticValidationMetric.from_cache_arg(cache_dir)
+        rank_zero_print(cyan("Semantic validation metrics enabled:"), cache_dir)
 
     # ---------------------------------------------------------------------
     # Length-related Properties and Utils
@@ -272,6 +287,9 @@ class DFoTVideo(BasePytorchAlgo):
             masks (Tensor, "B n_tokens"): Masks for the tokens.
             gt_videos (Optional[Tensor], "B n_frames *x_shape"): Optional ground truth videos, used for validation in latent diffusion.
         """
+        if self.semantic_metric is not None:
+            self._semantic_batch_metadata = batch.get("clip_metadata")
+
         # 1. Tokenize the videos and optionally prepare the ground truth videos
         gt_videos = None
         if self.is_latent_diffusion:
@@ -368,6 +386,7 @@ class DFoTVideo(BasePytorchAlgo):
         ):
             all_videos = self._sample_all_videos(batch, batch_idx, namespace)
             self._update_metrics(all_videos)
+            self._update_semantic_metrics(all_videos)
             self._log_videos(all_videos, namespace)
 
     def on_validation_epoch_start(self) -> None:
@@ -389,13 +408,18 @@ class DFoTVideo(BasePytorchAlgo):
             return
 
         for task in self.tasks:
+            metric_logs = self._metrics(task).log(task)
+            if self.semantic_metric is not None:
+                metric_logs.update(self.semantic_metric.log_dict(task))
             self.log_dict(
-                self._metrics(task).log(task),
+                metric_logs,
                 on_step=False,
                 on_epoch=True,
                 prog_bar=True,
                 sync_dist=True,
             )
+        if self.semantic_metric is not None:
+            self.semantic_metric.reset()
 
     def test_step(self, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
         return self.validation_step(*args, **kwargs, namespace="test")
@@ -752,17 +776,50 @@ class DFoTVideo(BasePytorchAlgo):
                 context_mask = context_mask[: self.logging.n_metrics_frames]
             metric(videos, gt_videos, context_mask=context_mask)
 
-    def _log_videos(self, all_videos: Dict[str, Tensor], namespace: str) -> None:
-        """Log videos during validation/test step."""
-        all_videos = self.gather_data(all_videos)
-        batch_size, n_frames = all_videos["gt"].shape[:2]
+    def _update_semantic_metrics(self, all_videos: Dict[str, Tensor]) -> None:
+        """Update optional semantic UI-element metrics during validation/test."""
+        if self.semantic_metric is None:
+            return
+        if self.logging.n_metrics_frames is not None:
+            all_videos = {
+                k: v[:, : self.logging.n_metrics_frames] for k, v in all_videos.items()
+            }
 
+        gt_videos = all_videos["gt"]
+        for task in self.tasks:
+            videos = all_videos[task]
+            context_mask = torch.zeros(self.n_frames).bool().to(self.device)
+            match task:
+                case "prediction":
+                    context_mask[: self.n_context_frames] = True
+                case "interpolation":
+                    context_mask[[0, -1]] = True
+            if self.logging.n_metrics_frames is not None:
+                context_mask = context_mask[: self.logging.n_metrics_frames]
+            self.semantic_metric.update(
+                task,
+                videos,
+                gt_videos,
+                context_mask=context_mask,
+                clip_metadata_batch=self._semantic_batch_metadata,
+            )
+
+    def _log_videos(self, all_videos: Dict[str, Tensor], namespace: str) -> None:
+        """Log videos during validation/test step.
+
+        Only rank 0 logs; each rank uses its own local batch rather than
+        gathering across all ranks.  This avoids a per-step all_gather barrier
+        that would deadlock during standalone trainer.validate() runs (where
+        there is no gradient sync to keep ranks in lock-step).
+        """
         if not (
             is_rank_zero
             and self.logger
             and self.num_logged_videos < self.logging.max_num_videos
         ):
             return
+
+        batch_size, n_frames = all_videos["gt"].shape[:2]
 
         num_videos_to_log = min(
             self.logging.max_num_videos - self.num_logged_videos,

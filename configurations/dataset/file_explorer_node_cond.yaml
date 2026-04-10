@@ -7,7 +7,8 @@
 #       --raw-data-dir  /work/$USER/data/dataset_compact
 #
 # This config is otherwise identical to file_explorer.yaml.  The only
-# additions are node_emb_dim and the correspondingly larger external_cond_dim.
+# additions are node_emb_dim, the embedding storage options below, and the
+# correspondingly larger external_cond_dim.
 
 defaults:
   - file_explorer   # inherits all file_explorer settings as base
@@ -37,3 +38,27 @@ data_std: 0.5
 
 latent:
   enable: false
+
+# ------------------------------------------------------------------
+# Node embedding storage strategy
+# ------------------------------------------------------------------
+#
+# Check total embedding size first:
+#   find <data_dir> -name '*_node_emb.pt' | xargs du -ch | tail -1
+#
+# If it fits in RAM → set node_emb_preload: true.
+#   All files are loaded once at dataset init (before workers are spawned).
+#   On Linux, DataLoader workers inherit the data via copy-on-write fork for
+#   free.  Training, validation, and evaluation all run with zero disk I/O
+#   for embeddings.
+#
+# If it does not fit in RAM → keep node_emb_preload: false.
+#   Files are loaded on demand and cached per worker (lazy LRU mode).
+#   Validation workers (ephemeral) do not benefit from caching, but training
+#   workers (persistent) do.  Tune node_emb_cache_size to balance hit rate
+#   against per-worker RAM:
+#     node_emb_cache_size × avg_frames × node_emb_dim × 4 B = RAM per worker
+#     e.g.  256 × 160 × 768 × 4 B ≈ 125 MB/worker → 2 GB for 16 workers
+
+node_emb_preload: false     # set true for fileExp_small if total size fits in RAM
+node_emb_cache_size: 256    # ignored when node_emb_preload: true

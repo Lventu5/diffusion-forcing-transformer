@@ -36,3 +36,4 @@ external_cond_processing: null # How to process external conditioning
 preload: false # Preload the dataset into CPU memory for faster data loading
 subdataset_size: null # A dataset is split into subdatasets of this size if not null
 num_eval_videos: null # Number of video clips to be used for evaluation, setting this ensures that evaluation clips are consistent across runs
+include_clip_metadata: false # Include source video path/start-frame metadata in batches for optional semantic validation metrics
