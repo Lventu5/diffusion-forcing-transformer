@@ -23,7 +23,7 @@ experiment:
     precision: bf16-mixed   # fp16 overflows at high noise levels during denoising
     num_sanity_val_steps: 0
     data:
-      num_workers: 4
+      num_workers: 16
 
 algorithm:
   diffusion:

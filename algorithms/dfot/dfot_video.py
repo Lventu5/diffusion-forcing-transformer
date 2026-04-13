@@ -208,8 +208,13 @@ class DFoTVideo(BasePytorchAlgo):
             DfotSemanticValidationMetric,
         )
 
-        self.semantic_metric = DfotSemanticValidationMetric.from_cache_arg(cache_dir)
+        debug_dir = self.logging.get("semantic_debug_dir", None)
+        self.semantic_metric = DfotSemanticValidationMetric.from_cache_arg(
+            cache_dir, debug_dir_arg=debug_dir
+        )
         rank_zero_print(cyan("Semantic validation metrics enabled:"), cache_dir)
+        if debug_dir:
+            rank_zero_print(cyan("Semantic debug images →"), debug_dir)
 
     # ---------------------------------------------------------------------
     # Length-related Properties and Utils
