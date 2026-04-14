@@ -21,8 +21,10 @@ num_heads: 4
 pos_emb_type: rope
 use_checkpointing: [false, false, false, false]
 # Dimension of the node/text embedding fed as cross-attention context.
-# Must match the node embedding dim used at data collection time (e.g. 768 for all-mpnet-base-v2).
-cross_attn_context_dim: 768
+# Must match the node embedding dim used at precompute time:
+#   Qwen/Qwen3-Embedding-8B → 4096
+#   all-mpnet-base-v2       → 768
+cross_attn_context_dim: 4096
 # Action conditioning dropout (classifier-free guidance).
 external_cond_dropout: 0.1
 # Text/node conditioning dropout — independent from action dropout.

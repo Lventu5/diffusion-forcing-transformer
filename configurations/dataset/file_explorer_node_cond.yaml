@@ -24,12 +24,13 @@ context_length: 8
 
 # Dimension of the precomputed node embedding.
 # Must match the sentence-transformer model used during precomputation:
-#   all-mpnet-base-v2  → 768
-#   all-MiniLM-L6-v2  → 384
-node_emb_dim: 768
+#   Qwen/Qwen3-Embedding-8B → 4096
+#   all-mpnet-base-v2       → 768
+#   all-MiniLM-L6-v2        → 384
+node_emb_dim: 4096
 
-# Total conditioning dimension: action (3) + node embedding (768).
-external_cond_dim: 771
+# Total conditioning dimension: action (3) + node embedding (4096).
+external_cond_dim: 4099
 
 external_cond_processing: mask_first
 
@@ -58,7 +59,7 @@ latent:
 #   workers (persistent) do.  Tune node_emb_cache_size to balance hit rate
 #   against per-worker RAM:
 #     node_emb_cache_size × avg_frames × node_emb_dim × 4 B = RAM per worker
-#     e.g.  256 × 160 × 768 × 4 B ≈ 125 MB/worker → 2 GB for 16 workers
+#     e.g.  256 × 160 × 4096 × 4 B ≈ 670 MB/worker → 10 GB for 16 workers
 
 node_emb_preload: false     # set true for fileExp_small if total size fits in RAM
 node_emb_cache_size: 256    # ignored when node_emb_preload: true

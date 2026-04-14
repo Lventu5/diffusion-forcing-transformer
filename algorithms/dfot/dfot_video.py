@@ -372,6 +372,55 @@ class DFoTVideo(BasePytorchAlgo):
             self.log_dict(norms)
 
     # ---------------------------------------------------------------------
+    # Freeze schedule (two-phase cross-attn finetuning)
+    # ---------------------------------------------------------------------
+
+    def _freeze_schedule_steps(self) -> int:
+        """Return cross_attn_only_steps from config, or 0 if not set."""
+        sched = getattr(self.cfg, "freeze_schedule", None)
+        if sched is None:
+            return 0
+        return int(getattr(sched, "cross_attn_only_steps", 0))
+
+    def _freeze_non_cross_attn(self) -> None:
+        """Phase 1: freeze everything that is NOT part of a cross_attn block."""
+        n_frozen = 0
+        for name, param in self.diffusion_model.named_parameters():
+            if "cross_attn" not in name:
+                param.requires_grad = False
+                n_frozen += 1
+        print(
+            f"[freeze_schedule] Phase 1 — froze {n_frozen} param tensors "
+            f"(everything except cross_attn). "
+            f"global_step={self.global_step}"
+        )
+
+    def _unfreeze_all(self) -> None:
+        """Phase 2: unfreeze all parameters for joint finetuning."""
+        n_unfrozen = 0
+        for param in self.diffusion_model.parameters():
+            if not param.requires_grad:
+                param.requires_grad = True
+                n_unfrozen += 1
+        print(
+            f"[freeze_schedule] Phase 2 — unfroze {n_unfrozen} param tensors "
+            f"(full joint finetuning). "
+            f"global_step={self.global_step}"
+        )
+
+    def on_train_start(self) -> None:
+        """Freeze non-cross-attn params if we are in Phase 1."""
+        threshold = self._freeze_schedule_steps()
+        if threshold > 0 and self.global_step < threshold:
+            self._freeze_non_cross_attn()
+
+    def on_train_batch_start(self, batch, batch_idx) -> None:
+        """Switch from Phase 1 → Phase 2 when the step threshold is reached."""
+        threshold = self._freeze_schedule_steps()
+        if threshold > 0 and self.global_step == threshold:
+            self._unfreeze_all()
+
+    # ---------------------------------------------------------------------
     # Validation & Test
     # ---------------------------------------------------------------------
 

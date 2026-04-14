@@ -71,6 +71,13 @@ checkpoint:
   reset_optimizer: False
   strict: True
 
+# Two-phase finetuning schedule for cross-attention conditioning.
+# Phase 1 (steps 0 … cross_attn_only_steps-1): freeze everything except cross_attn layers.
+# Phase 2 (steps cross_attn_only_steps …):       unfreeze all parameters and finetune jointly.
+# Set cross_attn_only_steps: 0 to disable (standard training, all params always unfrozen).
+freeze_schedule:
+  cross_attn_only_steps: 0
+
 # video generation tasks
 tasks:
   prediction:
