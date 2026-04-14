@@ -1,0 +1,29 @@
+# UViT3DActionNodeCrossAttn: same architecture as uvit3d_action_node but text/node
+# conditioning is handled via cross-attention instead of addition to the noise embedding.
+#
+# Action conditioning (dims 0:3 of external_cond) is still embedded and added
+# to the noise-level embedding as in UViT3DAction.
+#
+# Text/node embeddings (dims 3: of external_cond) are fed as cross-attention
+# context tokens to every CrossAttnTransformerBlock.
+#
+# Set dataset.external_cond_dim = 3 + <node_embedding_dim>  (e.g. 771 for 768-dim).
+# Set cross_attn_context_dim to match your node embedding dimension.
+name: uvit3d_action_node_crossattn
+channels: [128, 256, 512, 1024]
+emb_channels: 1024
+patch_size: 2
+block_types: ["ResBlock", "ResBlock", "CrossAttnTransformerBlock", "CrossAttnTransformerBlock"]
+block_dropouts: [0.0, 0.0, 0.1, 0.1]
+num_updown_blocks: [3, 3, 3]
+num_mid_blocks: 16
+num_heads: 4
+pos_emb_type: rope
+use_checkpointing: [false, false, false, false]
+# Dimension of the node/text embedding fed as cross-attention context.
+# Must match the node embedding dim used at data collection time (e.g. 768 for all-mpnet-base-v2).
+cross_attn_context_dim: 768
+# Action conditioning dropout (classifier-free guidance).
+external_cond_dropout: 0.1
+# Text/node conditioning dropout — independent from action dropout.
+node_cond_dropout: 0.1

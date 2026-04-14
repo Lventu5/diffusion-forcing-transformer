@@ -47,6 +47,7 @@ class UViT3D(BaseBackbone):
         num_updown_blocks = cfg.num_updown_blocks
         num_mid_blocks = cfg.num_mid_blocks
         num_heads = cfg.num_heads
+        cross_attn_context_dim = getattr(cfg, "cross_attn_context_dim", None)
         self.pos_emb_type = cfg.pos_emb_type
         self.num_levels = len(channels)
         resolution = x_shape[-1]
@@ -92,7 +93,7 @@ class UViT3D(BaseBackbone):
             if self.pos_emb_type == "rope":
                 pos_emb_cls = (
                     RotaryEmbedding3D
-                    if block_types[i_level] == "TransformerBlock"
+                    if block_types[i_level] in {"TransformerBlock", "CrossAttnTransformerBlock"}
                     else AxialRotaryEmbedding
                 )
                 dim = channel // num_heads
@@ -127,6 +128,13 @@ class UViT3D(BaseBackbone):
                 heads=num_heads,
                 use_axial=True,
                 ax1_len=self.temporal_length,
+            ),
+            "CrossAttnTransformerBlock": partial(
+                TransformerBlock,
+                emb_dim=self.emb_dim,
+                heads=num_heads,
+                use_cross_attn=True,
+                cross_attn_context_dim=cross_attn_context_dim,
             ),
         }
 
@@ -247,7 +255,13 @@ class UViT3D(BaseBackbone):
         return module(*args)
 
     def _run_level_blocks(
-        self, x: Tensor, emb: Tensor, i_level: int, is_up: bool = False
+        self,
+        x: Tensor,
+        emb: Tensor,
+        i_level: int,
+        is_up: bool = False,
+        context_tokens: Optional[Tensor] = None,
+        context_mask: Optional[Tensor] = None,
     ) -> Tensor:
         """
         Run the blocks (except up/downsampling blocks) for a given level.
@@ -266,22 +280,42 @@ class UViT3D(BaseBackbone):
         )
 
         for block in blocks:
-            x = self._checkpointed_forward(
-                block,
-                x,
-                emb,
-                use_checkpointing=use_checkpointing,
-            )
+            if isinstance(block, TransformerBlock) and getattr(block, "use_cross_attn", False):
+                x = self._checkpointed_forward(
+                    block,
+                    x,
+                    emb,
+                    context_tokens,
+                    context_mask,
+                    use_checkpointing=use_checkpointing,
+                )
+            else:
+                x = self._checkpointed_forward(
+                    block,
+                    x,
+                    emb,
+                    use_checkpointing=use_checkpointing,
+                )
         return x
 
     def _run_level(
-        self, x: Tensor, emb: Tensor, i_level: int, is_up: bool = False
+        self,
+        x: Tensor,
+        emb: Tensor,
+        i_level: int,
+        is_up: bool = False,
+        context_tokens: Optional[Tensor] = None,
+        context_mask: Optional[Tensor] = None,
     ) -> Tensor:
         """
         Run the blocks (except up/downsampling blocks) for a given level, accompanied by reshaping operations before and after.
         """
         x, emb = self._rearrange_and_add_pos_emb_if_transformer(x, emb, i_level)
-        x = self._run_level_blocks(x, emb, i_level, is_up)
+        x = self._run_level_blocks(
+            x, emb, i_level, is_up,
+            context_tokens=context_tokens,
+            context_mask=context_mask,
+        )
         x = self._unrearrange_if_transformer(x, i_level)
         return x
 
@@ -291,6 +325,8 @@ class UViT3D(BaseBackbone):
         noise_levels: Tensor,
         external_cond: Optional[Tensor] = None,
         external_cond_mask: Optional[Tensor] = None,
+        context_tokens: Optional[Tensor] = None,
+        context_mask: Optional[Tensor] = None,
     ) -> Tensor:
         """
         Forward pass of the U-ViT backbone.
@@ -298,6 +334,8 @@ class UViT3D(BaseBackbone):
             x: Input tensor of shape (B, T, C, H, W).
             noise_levels: Noise level tensor of shape (B, T).
             external_cond: External conditioning tensor of shape (B, T, C).
+            context_tokens: Optional cross-attention context tokens (B, M, Cc).
+            context_mask: Optional bool mask for context tokens (B, M).
         Returns:
             Output tensor of shape (B, T, C, H, W).
         """
@@ -326,20 +364,32 @@ class UViT3D(BaseBackbone):
         for i_level, down_block in enumerate(
             self.down_blocks,
         ):
-            x = self._run_level(x, emb, i_level)
+            x = self._run_level(
+                x, emb, i_level,
+                context_tokens=context_tokens,
+                context_mask=context_mask,
+            )
             hs_before.append(x)
             x = down_block[-1](x)
             hs_after.append(x)
 
         # Middle blocks
-        x = self._run_level(x, emb, self.num_levels - 1)
+        x = self._run_level(
+            x, emb, self.num_levels - 1,
+            context_tokens=context_tokens,
+            context_mask=context_mask,
+        )
 
         # Up-sampling blocks
         for _i_level, up_block in enumerate(self.up_blocks):
             i_level = self.num_levels - 2 - _i_level
             x = x - hs_after.pop()
             x = up_block[0](x) + hs_before.pop()
-            x = self._run_level(x, emb, i_level, is_up=True)
+            x = self._run_level(
+                x, emb, i_level, is_up=True,
+                context_tokens=context_tokens,
+                context_mask=context_mask,
+            )
 
         x = self.project_output(x)
         out = rearrange(x, "(b t) c h w -> b t c h w", t=self.temporal_length)

@@ -162,6 +162,68 @@ class AttentionBlock(nn.Module):
         return x + self.out(x)
 
 
+class CrossAttnBlock(nn.Module):
+    """
+    Cross-attention block that attends input tokens to context tokens.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        heads: int,
+        emb_dim: int,
+        context_dim: Optional[int] = None,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        _ = emb_dim  # unused: CrossAttnBlock does not use FiLM conditioning
+        self.heads = heads
+        dim_head = dim // heads
+        self.norm = Normalize(dim)
+        self.context_norm = Normalize(context_dim or dim)
+        self.q_proj = nn.Linear(dim, dim, bias=False)
+        self.kv_proj = nn.Linear(context_dim or dim, dim * 2, bias=False)
+        self.q_norm, self.k_norm = Normalize(dim_head), Normalize(dim_head)
+        self.out = zero_module(nn.Linear(dim, dim, bias=True))
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        x: Tensor,
+        emb: Tensor,
+        context: Tensor,
+        context_mask: Optional[Tensor] = None,
+    ) -> Tensor:
+        """
+        Args:
+            x: (B, N, C) input tokens.
+            emb: (B, N, C) conditioning embedding (unused).
+            context: (B, M, Cc) context tokens.
+            context_mask: optional bool mask (B, M), True for valid tokens.
+        """
+        _ = emb
+        residual = x
+        x = self.norm(x)
+        context = self.context_norm(context)
+
+        q = self.q_proj(x)
+        kv = self.kv_proj(context)
+        q = rearrange(q, "b n (h d) -> b h n d", h=self.heads)
+        k, v = rearrange(kv, "b m (kv h d) -> kv b h m d", kv=2, h=self.heads).unbind(0)
+        q, k = self.q_norm(q), self.k_norm(k)
+
+        attn_mask = None
+        if context_mask is not None:
+            attn_mask = ~context_mask[:, None, None, :]
+
+        # pylint: disable-next=not-callable
+        x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=False)
+        x = rearrange(x, "b h n d -> b n (h d)")
+        x = self.out(x)
+        x = self.dropout(x)
+        return residual + x
+
+
 class AxialRotaryEmbedding(nn.Module):
     """
     Axial rotary embedding for axial attention.
@@ -206,6 +268,8 @@ class TransformerBlock(nn.Module):
         use_axial: bool = False,
         ax1_len: Optional[int] = None,
         rope: Optional[AxialRotaryEmbedding | RotaryEmbeddingND] = None,
+        use_cross_attn: bool = False,
+        cross_attn_context_dim: Optional[int] = None,
     ):
         super().__init__()
         self.rope = rope.ax2 if (rope is not None and use_axial) else rope
@@ -215,6 +279,7 @@ class TransformerBlock(nn.Module):
         dim_head = dim // heads
         self.use_axial = use_axial
         self.ax1_len = ax1_len
+        self.use_cross_attn = use_cross_attn
         mlp_dim = 4 * dim
         self.fused_dims = (3 * dim, mlp_dim)
         self.fused_attn_mlp_proj = nn.Linear(dim, sum(self.fused_dims), bias=True)
@@ -227,18 +292,35 @@ class TransformerBlock(nn.Module):
                 dim, heads, emb_dim, rope.ax1 if rope is not None else None
             )
 
+        if self.use_cross_attn:
+            self.cross_attn = CrossAttnBlock(
+                dim,
+                heads,
+                emb_dim,
+                context_dim=cross_attn_context_dim or dim,
+                dropout=dropout,
+            )
+
         self.mlp_out = nn.Sequential(
             nn.SiLU(),
             nn.Dropout(dropout),
             zero_module(nn.Linear(mlp_dim, dim, bias=True)),
         )
 
-    def forward(self, x: Tensor, emb: Tensor) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        emb: Tensor,
+        context_tokens: Optional[Tensor] = None,
+        context_mask: Optional[Tensor] = None,
+    ) -> Tensor:
         """
         Forward pass of the transformer block.
         Args:
             x: Input tensor of shape (B, N, C).
             emb: Embedding tensor of shape (B, N, C).
+            context_tokens: Optional context tokens (B, M, Cc) for cross-attention.
+            context_mask: Optional bool mask (B, M) for context tokens.
         Returns:
             Output tensor of shape (B, N, C).
         """
@@ -273,6 +355,13 @@ class TransformerBlock(nn.Module):
             )
             x = self.another_attn(x, emb)
             x = rearrange(x, "(b ax2) ax1 d -> (b ax1) ax2 d", ax2=ax2_len)
+
+        if self.use_cross_attn:
+            if context_tokens is None:
+                raise ValueError(
+                    "TransformerBlock with use_cross_attn=True requires context_tokens, but none were provided."
+                )
+            x = self.cross_attn(x, emb, context_tokens, context_mask=context_mask)
 
         x = x + self.mlp_out(mlp_h)
 
