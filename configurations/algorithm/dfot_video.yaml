@@ -111,3 +111,19 @@ logging:
   sanity_generation: False # generate video samples during sanity check
   raw_dir: null
   omniparser_cache_dir: null # Optional precomputed cache for semantic UI-element metrics during validation
+
+# Element-level spatial loss weighting.
+# Up-weights MSE loss inside OmniParser-detected UI element bounding boxes.
+#
+# Prerequisites:
+#   1. Precompute OmniParser cache:
+#        python src/ui_sim/dfot_simulator/scripts/precompute_omniparser_cache.py ...
+#   2. Enable clip metadata in the dataset config:
+#        include_clip_metadata: true
+#
+# When enabled: false (default) or clip_metadata absent, loss is unchanged.
+element_loss:
+  enabled: false
+  cache_dir: ""       # path to directory of per-trajectory *.json files
+  base_weight: 1.0    # loss multiplier outside element bboxes (leave at 1.0)
+  element_boost: 5.0  # loss multiplier inside element bboxes

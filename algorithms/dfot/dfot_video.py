@@ -1,4 +1,4 @@
-from typing import Optional, Any, Dict, Literal, Callable, Tuple
+from typing import Optional, Any, Dict, List, Literal, Callable, Tuple
 from functools import partial
 from omegaconf import DictConfig
 import numpy as np
@@ -27,6 +27,26 @@ from .diffusion import (
     ContinuousDiffusion,
 )
 from .history_guidance import HistoryGuidance
+
+
+def _unbatch_clip_metadata(
+    batched: Dict[str, Any], B: int
+) -> "List[Dict[str, Any]]":
+    """
+    Convert a collated clip_metadata dict (B-length tensors / lists) into a
+    list of B per-item dicts.
+
+    The default PyTorch collate turns:
+        {"video_path": [str, ...], "start_frame": LongTensor, ...}
+    into per-item dicts with plain Python scalars.
+    """
+    return [
+        {
+            k: (v[i].item() if hasattr(v[i], "item") else v[i])
+            for k, v in batched.items()
+        }
+        for i in range(B)
+    ]
 
 
 class DFoTVideo(BasePytorchAlgo):
@@ -82,6 +102,8 @@ class DFoTVideo(BasePytorchAlgo):
         self.generator = None
         self.semantic_metric = None
         self._semantic_batch_metadata = None
+        self.element_loss_weighter = None
+        self._element_spatial_weight: Optional[Tensor] = None
 
         super().__init__(cfg)
 
@@ -120,6 +142,7 @@ class DFoTVideo(BasePytorchAlgo):
             disable=not self.cfg.compile,
         )
         self.register_data_mean_std(self.cfg.data_mean, self.cfg.data_std)
+        self._build_element_loss_weighter()
 
         # 2. VAE model
         if self.is_latent_diffusion and self.is_latent_online:
@@ -215,6 +238,36 @@ class DFoTVideo(BasePytorchAlgo):
         rank_zero_print(cyan("Semantic validation metrics enabled:"), cache_dir)
         if debug_dir:
             rank_zero_print(cyan("Semantic debug images →"), debug_dir)
+
+    def _build_element_loss_weighter(self) -> None:
+        """
+        Initialise ElementLossWeighter if element_loss is configured and enabled.
+
+        Reads ``cfg.element_loss`` (optional).  If absent or disabled, this is
+        a no-op and self.element_loss_weighter stays None.
+
+        Requires ``include_clip_metadata: true`` in the dataset config so that
+        each batch carries the video_path / frame-index information needed to
+        look up bounding boxes.  If clip_metadata is missing at runtime the
+        weighter is silently bypassed (uniform weight 1.0 everywhere).
+        """
+        el_cfg = getattr(self.cfg, "element_loss", None)
+        if el_cfg is None or not getattr(el_cfg, "enabled", False):
+            return
+
+        from ui_sim.dfot_simulator.element_loss import ElementLossWeighter
+
+        self.element_loss_weighter = ElementLossWeighter(
+            cache_dir=el_cfg.cache_dir,
+            base_weight=float(getattr(el_cfg, "base_weight", 1.0)),
+            element_boost=float(getattr(el_cfg, "element_boost", 5.0)),
+        )
+        rank_zero_print(
+            cyan(
+                f"[element_loss] enabled — boost={el_cfg.element_boost}x, "
+                f"cache={el_cfg.cache_dir}"
+            )
+        )
 
     # ---------------------------------------------------------------------
     # Length-related Properties and Utils
@@ -314,6 +367,23 @@ class DFoTVideo(BasePytorchAlgo):
             print("[DEBUG] xs after _normalize_x (before diffusion model):", xs)
             self._debug_printed_xs = True
 
+        # Compute element-level spatial weight map (training only).
+        # Side-channel via self._element_spatial_weight — same pattern as
+        # self._semantic_batch_metadata — so the return tuple stays unchanged
+        # and _eval_denoising's hard 4-tuple unpack is not affected.
+        self._element_spatial_weight = None
+        if self.element_loss_weighter is not None and self.trainer.training:
+            clip_meta = batch.get("clip_metadata")
+            if clip_meta is not None:
+                B = xs.shape[0]
+                H, W = xs.shape[-2], xs.shape[-1]
+                meta_list = _unbatch_clip_metadata(clip_meta, B)
+                self._element_spatial_weight = (
+                    self.element_loss_weighter.build_batch_weight_map(
+                        meta_list, H, W, xs.device
+                    )
+                )
+
         # 2. Prepare external conditions
         conditions = batch.get("conds", None)
 
@@ -341,6 +411,13 @@ class DFoTVideo(BasePytorchAlgo):
             self._process_conditions(conditions),
             k=noise_levels,
         )
+
+        # Apply element-level spatial weight if available (set in on_after_batch_transfer).
+        # loss shape: (B, T, C, H, W) — weight shape: (B, T, 1, H, W) → broadcasts over C.
+        if self._element_spatial_weight is not None:
+            loss = loss * self._element_spatial_weight
+            self._element_spatial_weight = None  # consume to avoid stale state
+
         loss = self._reweight_loss(loss, masks)
 
         if batch_idx % self.cfg.logging.loss_freq == 0:
@@ -1620,9 +1697,18 @@ class DFoTVideo(BasePytorchAlgo):
         parameter_keys = [
             "diffusion_model." + k for k, _ in self.diffusion_model.named_parameters()
         ]
-        assert len(parameter_keys) == len(
-            ema_weights
-        ), "Number of original weights and EMA weights do not match."
+        if len(parameter_keys) != len(ema_weights):
+            rank_zero_print(
+                cyan(
+                    f"WARNING: EMA weight count ({len(ema_weights)}) != current model "
+                    f"parameter count ({len(parameter_keys)}). Skipping EMA weight loading "
+                    f"and falling back to checkpoint state_dict weights. This is expected "
+                    f"when loading a checkpoint from a different backbone architecture "
+                    f"(e.g. finetuning {self.cfg.backbone.name} from a checkpoint saved "
+                    f"with a different backbone)."
+                )
+            )
+            return
         for key, weight in zip(parameter_keys, ema_weights):
             checkpoint["state_dict"][key] = weight
 

@@ -82,7 +82,7 @@ def _remap(old_key: str) -> str | None:
 
 def convert(input_path: str, output_path: str) -> None:
     print(f"Loading  {input_path}")
-    ckpt = torch.load(input_path, map_location="cpu")
+    ckpt = torch.load(input_path, map_location="cpu", weights_only=False)
 
     state_dict = ckpt.get("state_dict", ckpt)
 

@@ -13,6 +13,7 @@ from ..backbones import (
     UViT3DPose,
     UViT3DAction,
     UViT3DActionNode,
+    UViT3DActionNodeCrossAttn,
 )
 from .noise_schedule import make_beta_schedule
 
@@ -66,6 +67,8 @@ class DiscreteDiffusion(nn.Module):
                 model_cls = UViT3DAction
             case "uvit3d_action_node":
                 model_cls = UViT3DActionNode
+            case "uvit3d_action_node_crossattn":
+                model_cls = UViT3DActionNodeCrossAttn
             case "u_vit3d_pose":
                 model_cls = UViT3DPose
             case "dit3d":
@@ -73,7 +76,7 @@ class DiscreteDiffusion(nn.Module):
             case "dit3d_pose":
                 model_cls = DiT3DPose
             case _:
-                raise ValueError(f"unknown model type {self.model_type}")
+                raise ValueError(f"unknown model type {self.backbone_cfg.name}")
         self.model = model_cls(
             cfg=self.backbone_cfg,
             x_shape=self.x_shape,
