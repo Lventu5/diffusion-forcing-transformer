@@ -65,6 +65,8 @@ class UViT3DPose(UViT3D):
         noise_levels: Tensor,
         external_cond: Optional[Tensor] = None,
         external_cond_mask: Optional[Tensor] = None,
+        context_tokens: Optional[Tensor] = None,
+        context_mask: Optional[Tensor] = None,
     ) -> Tensor:
         """
         Forward pass of the U-ViT backbone, with pose conditioning.
@@ -72,6 +74,8 @@ class UViT3DPose(UViT3D):
             x: Input tensor of shape (B, T, C, H, W).
             noise_levels: Noise level tensor of shape (B, T).
             external_cond: External conditioning tensor of shape (B, T, C', H, W).
+            context_tokens: Optional cross-attention context tokens (B, M, Cc).
+            context_mask: Optional bool mask for context tokens (B, M).
         Returns:
             Output tensor of shape (B, T, C, H, W).
         """
@@ -111,20 +115,32 @@ class UViT3DPose(UViT3D):
         for i_level, down_block in enumerate(
             self.down_blocks,
         ):
-            x = self._run_level(x, embs[i_level], i_level)
+            x = self._run_level(
+                x, embs[i_level], i_level,
+                context_tokens=context_tokens,
+                context_mask=context_mask,
+            )
             hs_before.append(x)
             x = down_block[-1](x)
             hs_after.append(x)
 
         # Middle blocks
-        x = self._run_level(x, embs[-1], self.num_levels - 1)
+        x = self._run_level(
+            x, embs[-1], self.num_levels - 1,
+            context_tokens=context_tokens,
+            context_mask=context_mask,
+        )
 
         # Up-sampling blocks
         for _i_level, up_block in enumerate(self.up_blocks):
             i_level = self.num_levels - 2 - _i_level
             x = x - hs_after.pop()
             x = up_block[0](x) + hs_before.pop()
-            x = self._run_level(x, embs[i_level], i_level, is_up=True)
+            x = self._run_level(
+                x, embs[i_level], i_level, is_up=True,
+                context_tokens=context_tokens,
+                context_mask=context_mask,
+            )
 
         x = self.project_output(x)
         return rearrange(x, "(b t) c h w -> b t c h w", t=self.temporal_length)

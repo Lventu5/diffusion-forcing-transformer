@@ -415,6 +415,14 @@ class DFoTVideo(BasePytorchAlgo):
         # Apply element-level spatial weight if available (set in on_after_batch_transfer).
         # loss shape: (B, T, C, H, W) — weight shape: (B, T, 1, H, W) → broadcasts over C.
         if self._element_spatial_weight is not None:
+            if batch_idx % self.cfg.logging.loss_freq == 0:
+                self.log(
+                    "training/element_weight_mean",
+                    self._element_spatial_weight.mean(),
+                    on_step=True,
+                    on_epoch=False,
+                    sync_dist=True,
+                )
             loss = loss * self._element_spatial_weight
             self._element_spatial_weight = None  # consume to avoid stale state
 
@@ -1451,7 +1459,7 @@ class DFoTVideo(BasePytorchAlgo):
             with history_guidance(context_mask) as history_guidance_manager:
                 nfe = history_guidance_manager.nfe
                 pbar.set_postfix(NFE=nfe)
-                xs_pred, from_noise_levels, to_noise_levels, conditions_mask = (
+                xs_pred, from_noise_levels, to_noise_levels, conditions_mask, node_conditions_mask = (
                     history_guidance_manager.prepare(
                         xs_pred,
                         from_noise_levels,
@@ -1507,6 +1515,7 @@ class DFoTVideo(BasePytorchAlgo):
                     ),
                     conditions_mask,
                     guidance_fn=composed_guidance_fn,
+                    node_cond_mask=node_conditions_mask,
                 )
 
                 xs_pred = history_guidance_manager.compose(xs_pred)
@@ -1635,6 +1644,7 @@ class DFoTVideo(BasePytorchAlgo):
         # 3. (Optionally) reset the optimizer states - for fresh finetuning or resuming training
         if self.cfg.checkpoint.reset_optimizer:
             checkpoint["optimizer_states"] = []
+            checkpoint["lr_schedulers"] = []
 
         # 4. Rewrite the state_dict of the checkpoint, only leaving meaningful keys
         # defined by self._should_include_in_checkpoint

@@ -127,8 +127,17 @@ class BaseLightningExperiment(BaseExperiment):
         if torch.cuda.device_count() <= 1:
             return "auto"
 
+        # Auto-enable when a freeze schedule is active: frozen params are
+        # registered by DDP at setup (requires_grad=True) but removed from
+        # the backward graph in on_train_start, so the reducer must scan
+        # the autograd graph rather than assuming all params get gradients.
+        find_unused = self.cfg.find_unused_parameters
+        freeze_cfg = getattr(self.root_cfg.algorithm, "freeze_schedule", None)
+        if freeze_cfg is not None and getattr(freeze_cfg, "cross_attn_only_steps", 0) > 0:
+            find_unused = True
+
         strategy_kwargs = {
-            "find_unused_parameters": self.cfg.find_unused_parameters,
+            "find_unused_parameters": find_unused,
         }
         if self.cfg.num_nodes == 1:
             strategy_kwargs["cluster_environment"] = LightningEnvironment()

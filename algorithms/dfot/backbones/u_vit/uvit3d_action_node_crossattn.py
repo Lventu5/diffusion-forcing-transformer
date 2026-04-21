@@ -82,6 +82,7 @@ class UViT3DActionNodeCrossAttn(UViT3DAction):
         noise_levels: Tensor,
         external_cond: Optional[Tensor] = None,
         external_cond_mask: Optional[Tensor] = None,
+        node_cond_mask: Optional[Tensor] = None,
     ) -> Tensor:
         """
         Forward pass.
@@ -90,8 +91,10 @@ class UViT3DActionNodeCrossAttn(UViT3DAction):
             x:                  (B, T, C, H, W)
             noise_levels:       (B, T)
             external_cond:      (B, T, 3 + node_emb_dim)  or None
-            external_cond_mask: (B,) optional CFG mask; zeros both action and
-                                text conditioning when set.
+            external_cond_mask: (B,) CFG mask for action conditioning.
+            node_cond_mask:     (B,) CFG mask for node/text conditioning.
+                                When provided, action and node are dropped independently.
+                                When None, falls back to external_cond_mask (joint drop).
         Returns:
             (B, T, C, H, W)
         """
@@ -100,10 +103,11 @@ class UViT3DActionNodeCrossAttn(UViT3DAction):
             action_cond = external_cond[..., : self._ACTION_DIMS]   # (B, T, 3)
             node_emb    = external_cond[..., self._ACTION_DIMS :]   # (B, T, node_emb_dim)
 
-            # Apply dropout for CFG; share the mask with the action path so
-            # both signals are zeroed together at inference time.
+            # Independent dropout: use node_cond_mask if provided, else fall back to
+            # external_cond_mask (backward-compatible joint drop).
             context_tokens = self._node_dropout(
-                node_emb.float(), external_cond_mask
+                node_emb.float(),
+                node_cond_mask if node_cond_mask is not None else external_cond_mask,
             )  # (B, T, node_emb_dim)
 
             external_cond = action_cond

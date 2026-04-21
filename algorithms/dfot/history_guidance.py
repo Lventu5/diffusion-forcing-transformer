@@ -388,11 +388,14 @@ class HistoryGuidanceManager:
         self.gen_mask = gen_mask
 
         # 3. Build a dictionary that maps partial history conditions to cumulative weights
-        # key = noise level sequence for the history + whether to mask external conditioning
+        # key = noise level sequence for the history + (mask_external_cond, mask_map_cond)
         hist_to_weights: Dict[tuple, float] = defaultdict(float)
 
+        use_ext = self.history_guidance.use_external_cond_guidance
+        use_map = self.history_guidance.use_map_cond_guidance
+
         hist_to_weights[
-            (1.0,) * hist_len + (self.history_guidance.use_external_cond_guidance,)
+            (1.0,) * hist_len + (use_ext, use_map)
         ] = 1.0  # unconditional score
 
         self.visualizer.reset(
@@ -405,25 +408,32 @@ class HistoryGuidanceManager:
             noise_levels_start, noise_levels_end = hist_segment.to_noise_levels(
                 reduced_mask[self.hist_indices] == 2
             )
-            hist_to_weights[noise_levels_start + (False,)] += weight
-            hist_to_weights[
-                noise_levels_end + (self.history_guidance.use_external_cond_guidance,)
-            ] -= weight
+            # Pose/external conditioning guidance component
+            hist_to_weights[noise_levels_start + (False, use_map)] += weight
+            hist_to_weights[noise_levels_end + (use_ext, use_map)] -= weight
+
+            # Map conditioning guidance component (independent)
+            if use_map:
+                hist_to_weights[noise_levels_start + (use_ext, False)] += weight
+                hist_to_weights[noise_levels_end + (use_ext, use_map)] -= weight
+
             self.visualizer.add_segment(
                 idx, noise_levels_start, noise_levels_end, weight
             )
 
         self.visualizer.save_frame()
 
-        # 4. Convert the dictionary to noise levels, external conditioning mask, and weights
+        # 4. Convert the dictionary to noise levels, conditioning masks, and weights
         hist_noise_levels = []
         cond_mask = []
+        map_cond_mask = []
         weights = []
         for hist_cond, weight in hist_to_weights.items():
             if weight == 0:
                 continue
-            hist_noise_levels.append(hist_cond[:-1])
-            cond_mask.append(hist_cond[-1])
+            hist_noise_levels.append(hist_cond[:-2])
+            cond_mask.append(hist_cond[-2])
+            map_cond_mask.append(hist_cond[-1])
             weights.append(weight)
         self.hist_noise_levels = (
             torch.tensor(hist_noise_levels, device=self.device)
@@ -431,6 +441,7 @@ class HistoryGuidanceManager:
             - 1
         ).long()
         self.cond_mask = torch.tensor(cond_mask, device=self.device)
+        self.map_cond_mask = torch.tensor(map_cond_mask, device=self.device)
         self.weights = torch.tensor(weights, device=self.device).float()
         self.num_hist = len(self.weights)
 
@@ -450,7 +461,7 @@ class HistoryGuidanceManager:
         to_noise_levels: torch.Tensor,
         replacement_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
         replacement_only: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
         Modify the input before passing it to the sampling process.
 
@@ -477,6 +488,8 @@ class HistoryGuidanceManager:
             modify the noise levels of the history and tokens to be generated properly.
         cond_mask:
             create a mask for external conditioning.
+        map_cond_mask:
+            create a mask for map/context cross-attention conditioning.
         """
         b, g, h = x.size(0), self.num_gen, self.num_hist
         x, from_noise_levels, to_noise_levels, mask = map(
@@ -540,6 +553,7 @@ class HistoryGuidanceManager:
             from_noise_levels,
             to_noise_levels,
             repeat(self.cond_mask, "h -> (b h g)", b=b, g=g).clone(),
+            repeat(self.map_cond_mask, "h -> (b h g)", b=b, g=g).clone(),
         )
 
     def compose(self, x: torch.Tensor) -> torch.Tensor:
@@ -605,6 +619,7 @@ class HistoryGuidance:
         gen_segments: Optional[List[List[int] | ALLType]] = None,
         timesteps: int = 1000,
         use_external_cond_guidance: bool = False,
+        use_map_cond_guidance: bool = False,
         visualize: bool = True,
     ):
         """Initialize the history guidance."""
@@ -615,6 +630,7 @@ class HistoryGuidance:
         self.gen_segments = gen_segments
         self.timesteps = timesteps
         self.use_external_cond_guidance = use_external_cond_guidance
+        self.use_map_cond_guidance = use_map_cond_guidance
         self.visualizer = HistoryGuidanceVisualizer(
             len(hist_segments), disabled=not visualize
         )
@@ -686,18 +702,24 @@ class HistoryGuidance:
 
     @classmethod
     def conditional(
-        cls, timesteps: int = 1000, visualize: bool = True
+        cls,
+        timesteps: int = 1000,
+        use_external_cond_guidance: bool = False,
+        use_map_cond_guidance: bool = False,
+        visualize: bool = True,
     ) -> "HistoryGuidance":
         """
         History guidance scheme equivalent to:
         typical conditional sampling,
         i.e. sampling with only a conditional score (on the entire history).
         """
+        _ = use_external_cond_guidance, use_map_cond_guidance
         return cls(
             hist_segments=[HistorySegment.full()],
             hist_weights=[1],
             timesteps=timesteps,
             use_external_cond_guidance=False,
+            use_map_cond_guidance=False,
             visualize=visualize,
         )
 
@@ -706,12 +728,15 @@ class HistoryGuidance:
         cls,
         stabilization_level: float,
         timesteps: int = 1000,
+        use_external_cond_guidance: bool = False,
+        use_map_cond_guidance: bool = False,
         visualize: bool = True,
     ) -> "HistoryGuidance":
         """
         History guidance scheme equivalent to:
         conditional sampling with stabilization technique (Chen et al., https://arxiv.org/abs/2407.01392)
         """
+        _ = use_external_cond_guidance, use_map_cond_guidance
         return cls(
             hist_segments=[
                 HistorySegment(
@@ -723,6 +748,7 @@ class HistoryGuidance:
             hist_weights=[1],
             timesteps=timesteps,
             use_external_cond_guidance=False,
+            use_map_cond_guidance=False,
             visualize=visualize,
         )
 
@@ -732,6 +758,7 @@ class HistoryGuidance:
         guidance_scale: float,
         timesteps: int = 1000,
         use_external_cond_guidance: bool = True,
+        use_map_cond_guidance: bool = False,
         visualize: bool = True,
     ) -> "HistoryGuidance":
         """
@@ -743,6 +770,7 @@ class HistoryGuidance:
             hist_weights=[guidance_scale],
             timesteps=timesteps,
             use_external_cond_guidance=use_external_cond_guidance,
+            use_map_cond_guidance=use_map_cond_guidance,
             visualize=visualize,
         )
 
@@ -753,6 +781,7 @@ class HistoryGuidance:
         stabilization_level: float,
         timesteps: int = 1000,
         use_external_cond_guidance: bool = True,
+        use_map_cond_guidance: bool = False,
         visualize: bool = True,
     ) -> "HistoryGuidance":
         """
@@ -770,6 +799,7 @@ class HistoryGuidance:
             hist_weights=[guidance_scale],
             timesteps=timesteps,
             use_external_cond_guidance=use_external_cond_guidance,
+            use_map_cond_guidance=use_map_cond_guidance,
             visualize=visualize,
         )
 
@@ -780,6 +810,7 @@ class HistoryGuidance:
         freq_scale: float,
         timesteps: int = 1000,
         use_external_cond_guidance: bool = True,
+        use_map_cond_guidance: bool = False,
         visualize: bool = True,
     ) -> "HistoryGuidance":
         """
@@ -794,6 +825,7 @@ class HistoryGuidance:
             hist_weights=[1, guidance_scale - 1],
             timesteps=timesteps,
             use_external_cond_guidance=use_external_cond_guidance,
+            use_map_cond_guidance=use_map_cond_guidance,
             visualize=visualize,
         )
 
@@ -805,6 +837,7 @@ class HistoryGuidance:
         stabilization_level: float,
         timesteps: int = 1000,
         use_external_cond_guidance: bool = True,
+        use_map_cond_guidance: bool = False,
         visualize: bool = True,
     ) -> "HistoryGuidance":
         """
@@ -823,6 +856,7 @@ class HistoryGuidance:
             hist_weights=[1, guidance_scale - 1],
             timesteps=timesteps,
             use_external_cond_guidance=use_external_cond_guidance,
+            use_map_cond_guidance=use_map_cond_guidance,
             visualize=visualize,
         )
 
@@ -834,6 +868,7 @@ class HistoryGuidance:
         gen_segments: Optional[List[List[int] | ALLType]] = None,
         timesteps: int = 1000,
         use_external_cond_guidance: bool = True,
+        use_map_cond_guidance: bool = False,
         visualize: bool = True,
     ) -> "HistoryGuidance":
         """
@@ -850,6 +885,7 @@ class HistoryGuidance:
             gen_segments=gen_segments,
             timesteps=timesteps,
             use_external_cond_guidance=use_external_cond_guidance,
+            use_map_cond_guidance=use_map_cond_guidance,
             visualize=visualize,
         )
 
@@ -861,6 +897,7 @@ class HistoryGuidance:
         gen_segments: Optional[List[List[int] | ALLType]] = None,
         timesteps: int = 1000,
         use_external_cond_guidance: bool = True,
+        use_map_cond_guidance: bool = False,
         visualize: bool = True,
     ):
         """
@@ -894,6 +931,7 @@ class HistoryGuidance:
             gen_segments=gen_segments,
             timesteps=timesteps,
             use_external_cond_guidance=use_external_cond_guidance,
+            use_map_cond_guidance=use_map_cond_guidance,
             visualize=visualize,
         )
 
@@ -931,9 +969,9 @@ class SimpleHistoryGuidanceManager:
         to_noise_levels: torch.Tensor,
         replacement_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
         replacement_only: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         if self.guidance_scale == 1:
-            return x, from_noise_levels, to_noise_levels, None
+            return x, from_noise_levels, to_noise_levels, None, None
 
         x = repeat(x, "b t ... -> b h t ...", h=2).clone()
         from_noise_levels = repeat(from_noise_levels, "b t -> b h t", h=2).clone()
@@ -959,16 +997,16 @@ class SimpleHistoryGuidanceManager:
             lambda y: rearrange(y, "b h t ... -> (b h) t ..."),
             (x, from_noise_levels, to_noise_levels),
         )
-        cond_mask = (
+        drop_mask = (
             repeat(
                 torch.tensor([1, 0], device=self.device).bool(),
                 "h -> (b h)",
                 b=x.size(0) // 2,
             ).clone()
-            if self.history_guidance.use_external_cond_guidance
-            else None
         )
-        return x, from_noise_levels, to_noise_levels, cond_mask
+        cond_mask = drop_mask if self.history_guidance.use_external_cond_guidance else None
+        map_cond_mask = drop_mask.clone() if self.history_guidance.use_map_cond_guidance else None
+        return x, from_noise_levels, to_noise_levels, cond_mask, map_cond_mask
 
     def _extend(self, a: torch.Tensor, x: torch.Tensor):
         return rearrange(a, "... -> ..." + " 1" * (x.ndim - a.ndim))

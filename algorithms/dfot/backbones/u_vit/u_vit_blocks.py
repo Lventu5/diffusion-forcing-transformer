@@ -1,7 +1,13 @@
 from typing import Optional, Tuple
+import torch
 from torch import nn, Tensor
 from torch.nn import functional as F
 from einops import rearrange
+
+
+def _rotate_half(x: Tensor) -> Tensor:
+    x1, x2 = x.chunk(2, dim=-1)
+    return torch.cat([-x2, x1], dim=-1)
 from ..modules.normalization import (
     RMSNorm as Normalize,
 )
@@ -174,11 +180,13 @@ class CrossAttnBlock(nn.Module):
         emb_dim: int,
         context_dim: Optional[int] = None,
         dropout: float = 0.0,
+        t_seq: int = 0,
     ):
         super().__init__()
         _ = emb_dim  # unused: CrossAttnBlock does not use FiLM conditioning
         self.heads = heads
         dim_head = dim // heads
+        self.t_seq = t_seq
         self.norm = Normalize(dim)
         self.context_norm = Normalize(context_dim or dim)
         self.q_proj = nn.Linear(dim, dim, bias=False)
@@ -186,6 +194,11 @@ class CrossAttnBlock(nn.Module):
         self.q_norm, self.k_norm = Normalize(dim_head), Normalize(dim_head)
         self.out = zero_module(nn.Linear(dim, dim, bias=True))
         self.dropout = nn.Dropout(dropout)
+        # Temporal 1D RoPE: shared T index for video Q tokens and context K tokens.
+        self.rope_t = RotaryEmbedding1D(dim_head, t_seq) if t_seq > 0 else None
+        # Set to True externally to capture last attention weights for visualization.
+        self.store_attn_weights: bool = False
+        self.last_attn_weights: Optional[Tensor] = None  # (B, heads, N, M)
 
     def forward(
         self,
@@ -193,6 +206,7 @@ class CrossAttnBlock(nn.Module):
         emb: Tensor,
         context: Tensor,
         context_mask: Optional[Tensor] = None,
+        is_causal: bool = False,
     ) -> Tensor:
         """
         Args:
@@ -200,6 +214,7 @@ class CrossAttnBlock(nn.Module):
             emb: (B, N, C) conditioning embedding (unused).
             context: (B, M, Cc) context tokens.
             context_mask: optional bool mask (B, M), True for valid tokens.
+            is_causal: if True, frame t only attends to context tokens <= t.
         """
         _ = emb
         residual = x
@@ -212,12 +227,42 @@ class CrossAttnBlock(nn.Module):
         k, v = rearrange(kv, "b m (kv h d) -> kv b h m d", kv=2, h=self.heads).unbind(0)
         q, k = self.q_norm(q), self.k_norm(k)
 
+        if self.rope_t is not None:
+            n_q, n_k = q.shape[2], k.shape[2]
+            t_idx_q = torch.arange(n_q, device=q.device) // (n_q // self.t_seq)
+            t_idx_k = torch.arange(n_k, device=k.device) // (n_k // self.t_seq)
+            freqs_q = self.rope_t.freqs[t_idx_q][None, None]  # (1, 1, n_q, dim_head)
+            freqs_k = self.rope_t.freqs[t_idx_k][None, None]  # (1, 1, n_k, dim_head)
+            q = q * freqs_q.cos() + _rotate_half(q) * freqs_q.sin()
+            k = k * freqs_k.cos() + _rotate_half(k) * freqs_k.sin()
+
         attn_mask = None
-        if context_mask is not None:
+        if is_causal:
+            n = x.shape[1]
+            m = context.shape[1]
+            if n % m != 0:
+                raise ValueError(
+                    f"Causal cross-attn expects N divisible by M (N={n}, M={m})."
+                )
+            patches_per_t = n // m
+            t_q = torch.arange(n, device=x.device) // patches_per_t
+            t_k = torch.arange(m, device=x.device)
+            causal_allow = t_k[None, :] <= t_q[:, None]  # (N, M)
+            attn_mask = ~causal_allow[None, None, :, :]  # True = masked
+        elif context_mask is not None:
             attn_mask = ~context_mask[:, None, None, :]
 
-        # pylint: disable-next=not-callable
-        x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=False)
+        if self.store_attn_weights:
+            scale = q.shape[-1] ** -0.5
+            scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+            if attn_mask is not None:
+                scores = scores.masked_fill(attn_mask, float("-inf"))
+            attn_w = scores.softmax(dim=-1)
+            self.last_attn_weights = attn_w.detach().cpu()
+            x = torch.matmul(attn_w, v)
+        else:
+            # pylint: disable-next=not-callable
+            x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=False)
         x = rearrange(x, "b h n d -> b n (h d)")
         x = self.out(x)
         x = self.dropout(x)
@@ -269,7 +314,9 @@ class TransformerBlock(nn.Module):
         ax1_len: Optional[int] = None,
         rope: Optional[AxialRotaryEmbedding | RotaryEmbeddingND] = None,
         use_cross_attn: bool = False,
+        cross_attn_is_causal: bool = False,
         cross_attn_context_dim: Optional[int] = None,
+        cross_attn_t_seq: int = 0,
     ):
         super().__init__()
         self.rope = rope.ax2 if (rope is not None and use_axial) else rope
@@ -280,6 +327,7 @@ class TransformerBlock(nn.Module):
         self.use_axial = use_axial
         self.ax1_len = ax1_len
         self.use_cross_attn = use_cross_attn
+        self.cross_attn_is_causal = cross_attn_is_causal
         mlp_dim = 4 * dim
         self.fused_dims = (3 * dim, mlp_dim)
         self.fused_attn_mlp_proj = nn.Linear(dim, sum(self.fused_dims), bias=True)
@@ -299,6 +347,7 @@ class TransformerBlock(nn.Module):
                 emb_dim,
                 context_dim=cross_attn_context_dim or dim,
                 dropout=dropout,
+                t_seq=cross_attn_t_seq,
             )
 
         self.mlp_out = nn.Sequential(
@@ -361,7 +410,10 @@ class TransformerBlock(nn.Module):
                 raise ValueError(
                     "TransformerBlock with use_cross_attn=True requires context_tokens, but none were provided."
                 )
-            x = self.cross_attn(x, emb, context_tokens, context_mask=context_mask)
+            x = self.cross_attn(
+                x, emb, context_tokens, context_mask=context_mask,
+                is_causal=self.cross_attn_is_causal,
+            )
 
         x = x + self.mlp_out(mlp_h)
 

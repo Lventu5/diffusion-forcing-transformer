@@ -113,7 +113,7 @@ class ContinuousDiffusion(DiscreteDiffusion):
             self.cfg.training_schedule
         )
 
-    def model_predictions(self, x, k, external_cond=None, external_cond_mask=None):
+    def model_predictions(self, x, k, external_cond=None, external_cond_mask=None, node_cond_mask=None):
         # self.logsnr[k] is -inf at the terminal step (zero_terminal_snr=True),
         # but training uses the continuous schedule bounded to [logsnr_min, logsnr_max].
         # Clamp to match the training distribution and avoid NaN in conditioning layers.
@@ -122,7 +122,7 @@ class ContinuousDiffusion(DiscreteDiffusion):
             max=self.training_schedule.max_logsnr,
         )
         model_output = self.model(
-            x, self.precond_scale * logsnr_k, external_cond, external_cond_mask
+            x, self.precond_scale * logsnr_k, external_cond, external_cond_mask, node_cond_mask=node_cond_mask
         )
 
         if self.objective == "pred_noise":
