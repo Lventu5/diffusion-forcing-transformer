@@ -262,7 +262,10 @@ class CrossAttnBlock(nn.Module):
             x = torch.matmul(attn_w, v)
         else:
             # pylint: disable-next=not-callable
-            x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=False)
+            # SDPA boolean convention: True = attend. Our attn_mask uses True = blocked,
+            # so negate before passing (the masked_fill branch above is already correct).
+            sdpa_mask = ~attn_mask if (attn_mask is not None and attn_mask.dtype == torch.bool) else attn_mask
+            x = F.scaled_dot_product_attention(q, k, v, attn_mask=sdpa_mask, is_causal=False)
         x = rearrange(x, "b h n d -> b n (h d)")
         x = self.out(x)
         x = self.dropout(x)

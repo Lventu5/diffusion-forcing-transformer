@@ -507,10 +507,16 @@ class DFoTVideo(BasePytorchAlgo):
             f"global_step={self.global_step}"
         )
 
-    def on_train_start(self) -> None:
-        """Freeze non-cross-attn params if we are in Phase 1."""
-        threshold = self._freeze_schedule_steps()
-        if threshold > 0 and self.global_step < threshold:
+    def configure_model(self) -> None:
+        """Freeze non-cross-attn params before DDP wraps the model (phase 1).
+
+        Called by Lightning before DDPStrategy.setup(), so frozen params are
+        never registered in DDP's reducer buckets.  This means DDP uses
+        find_unused_parameters=False (default) and has no async post-backward
+        graph-scan hooks — eliminating the deadlock that occurred when
+        Lightning's validation barrier raced with those hooks.
+        """
+        if self._freeze_schedule_steps() > 0:
             self._freeze_non_cross_attn()
 
     def on_train_batch_start(self, batch, batch_idx) -> None:
