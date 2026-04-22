@@ -198,7 +198,11 @@ class FileExplorerNodeCondAdvancedVideoDataset(FileExplorerAdvancedVideoDataset)
         )
         store: Dict[str, torch.Tensor] = {}
         for path in paths:
-            store[str(path)] = _load_node_emb_file(path)
+            # .contiguous().clone() materialises any mmap-backed storage into
+            # regular heap memory before moving it to /dev/shm, which is
+            # required for share_memory_() to work correctly across all
+            # PyTorch versions.
+            store[str(path)] = _load_node_emb_file(path).contiguous().clone().share_memory_()
 
         total_mb = sum(t.nbytes for t in store.values()) / 1024 ** 2
         rank_zero_print(cyan(f"[node_emb] Pre-load complete — {total_mb:.0f} MB in RAM."))
