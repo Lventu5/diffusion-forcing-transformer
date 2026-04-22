@@ -1387,7 +1387,7 @@ class DFoTVideo(BasePytorchAlgo):
         if context is None:
             # create empty context and zero context mask
             context = torch.zeros_like(xs_pred)
-            context_mask = torch.zeros_like(
+            context_mask = torch.zeros(
                 (batch_size, horizon), dtype=torch.long, device=self.device
             )
         elif padding > 0:
