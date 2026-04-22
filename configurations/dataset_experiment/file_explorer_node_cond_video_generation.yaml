@@ -29,7 +29,7 @@ experiment:
     precision: bf16-mixed
     num_sanity_val_steps: 0
     data:
-      num_workers: 0
+      num_workers: 4
 
 algorithm:
   diffusion:
