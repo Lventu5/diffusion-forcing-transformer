@@ -233,9 +233,18 @@ class DFoTVideo(BasePytorchAlgo):
 
         debug_dir = self.logging.get("semantic_debug_dir", None)
         self.semantic_metric = DfotSemanticValidationMetric.from_cache_arg(
-            cache_dir, debug_dir_arg=debug_dir
+            cache_dir,
+            debug_dir_arg=debug_dir,
+            ocr_cache_dir_arg=self.logging.get("ocr_cache_dir", None),
+            text_metric_weight=float(self.logging.get("ocr_text_weight", 5.0)),
+            ocr_min_confidence=float(self.logging.get("ocr_min_confidence", 0.5)),
         )
         rank_zero_print(cyan("Semantic validation metrics enabled:"), cache_dir)
+        if self.logging.get("ocr_cache_dir", None):
+            rank_zero_print(
+                cyan("OCR validation text metrics enabled:"),
+                self.logging.get("ocr_cache_dir"),
+            )
         if debug_dir:
             rank_zero_print(cyan("Semantic debug images →"), debug_dir)
 
@@ -261,10 +270,15 @@ class DFoTVideo(BasePytorchAlgo):
             cache_dir=el_cfg.cache_dir,
             base_weight=float(getattr(el_cfg, "base_weight", 1.0)),
             element_boost=float(getattr(el_cfg, "element_boost", 5.0)),
+            text_cache_dir=getattr(el_cfg, "text_cache_dir", None),
+            text_boost=float(getattr(el_cfg, "text_boost", 50.0)),
+            text_min_confidence=float(getattr(el_cfg, "text_min_confidence", 0.5)),
+            text_padding_px=int(getattr(el_cfg, "text_padding_px", 2)),
         )
         rank_zero_print(
             cyan(
                 f"[element_loss] enabled — boost={el_cfg.element_boost}x, "
+                f"text_boost={getattr(el_cfg, 'text_boost', 50.0)}x, "
                 f"cache={el_cfg.cache_dir}"
             )
         )

@@ -111,6 +111,9 @@ logging:
   sanity_generation: False # generate video samples during sanity check
   raw_dir: null
   omniparser_cache_dir: null # Optional precomputed cache for semantic UI-element metrics during validation
+  ocr_cache_dir: null # Optional PaddleOCR cache for high-weight text metrics during validation
+  ocr_text_weight: 5.0
+  ocr_min_confidence: 0.5
 
 # Element-level spatial loss weighting.
 # Up-weights MSE loss inside OmniParser-detected UI element bounding boxes.
@@ -125,5 +128,9 @@ logging:
 element_loss:
   enabled: false
   cache_dir: ""       # path to directory of per-trajectory *.json files
+  text_cache_dir: ""  # optional PaddleOCR text cache; empty means use cache_dir text boxes
   base_weight: 1.0    # loss multiplier outside element bboxes (leave at 1.0)
   element_boost: 5.0  # loss multiplier inside element bboxes
+  text_boost: 50.0    # loss multiplier inside OCR text bboxes
+  text_min_confidence: 0.5
+  text_padding_px: 2
