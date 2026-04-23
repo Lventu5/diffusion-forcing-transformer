@@ -196,9 +196,10 @@ class CrossAttnBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
         # Temporal 1D RoPE: shared T index for video Q tokens and context K tokens.
         self.rope_t = RotaryEmbedding1D(dim_head, t_seq) if t_seq > 0 else None
-        # Set to True externally to capture last attention weights for visualization.
+        # Set to True externally to capture first/last attention weights for visualization.
         self.store_attn_weights: bool = False
-        self.last_attn_weights: Optional[Tensor] = None  # (B, heads, N, M)
+        self.first_attn_weights: Optional[Tensor] = None  # (B, heads, N, M) – first step
+        self.last_attn_weights: Optional[Tensor] = None   # (B, heads, N, M) – last step
 
     def forward(
         self,
@@ -254,12 +255,15 @@ class CrossAttnBlock(nn.Module):
 
         if self.store_attn_weights:
             scale = q.shape[-1] ** -0.5
-            scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+            scores = torch.matmul(q.float(), k.float().transpose(-2, -1)) * scale
             if attn_mask is not None:
                 scores = scores.masked_fill(attn_mask, float("-inf"))
             attn_w = scores.softmax(dim=-1)
-            self.last_attn_weights = attn_w.detach().cpu()
-            x = torch.matmul(attn_w, v)
+            attn_w_cpu = attn_w.detach().cpu()
+            if self.first_attn_weights is None:
+                self.first_attn_weights = attn_w_cpu
+            self.last_attn_weights = attn_w_cpu
+            x = torch.matmul(attn_w, v.float()).to(q.dtype)
         else:
             # pylint: disable-next=not-callable
             # SDPA boolean convention: True = attend. Our attn_mask uses True = blocked,

@@ -543,7 +543,23 @@ class DFoTVideo(BasePytorchAlgo):
         if not (
             self.trainer.sanity_checking and not self.cfg.logging.sanity_generation
         ):
+            log_attn = is_rank_zero and self.logger and batch_idx == 0
+            if log_attn:
+                for m in self.diffusion_model.modules():
+                    if m.__class__.__name__ == "CrossAttnBlock":
+                        m.store_attn_weights = True
+                        m.first_attn_weights = None
+
             all_videos = self._sample_all_videos(batch, batch_idx, namespace)
+
+            if log_attn:
+                self._log_cross_attn_map(namespace)
+                for m in self.diffusion_model.modules():
+                    if m.__class__.__name__ == "CrossAttnBlock":
+                        m.store_attn_weights = False
+                        m.first_attn_weights = None
+                        m.last_attn_weights = None
+
             self._update_metrics(all_videos)
             self._update_semantic_metrics(all_videos)
             self._log_videos(all_videos, namespace)
@@ -1006,6 +1022,60 @@ class DFoTVideo(BasePytorchAlgo):
             )
 
         self.num_logged_videos += batch_size
+
+    def _log_cross_attn_map(self, namespace: str) -> None:
+        """
+        Log a temporal attention heatmap: (T_query × T_context) showing how
+        strongly each video frame attends to each map-crop time step.
+
+        Weights are captured during the validation_step forward passes
+        (store_attn_weights was enabled before super() was called).
+        """
+        try:
+            import wandb
+            import numpy as np
+        except ImportError:
+            return
+
+        cross_attn_blocks = [
+            m for m in self.diffusion_model.modules()
+            if m.__class__.__name__ == "CrossAttnBlock"
+        ]
+        if not cross_attn_blocks:
+            return
+
+        def _make_heat(weights):
+            """weights: (B, heads, N_query, N_context) CPU tensor → uint8 (T, T) numpy."""
+            attn = weights[0].mean(0)  # (N_query, N_context)
+            n_query, n_context = attn.shape
+            t_seq = self.max_tokens
+            n_context_per_t = n_context // t_seq if n_context >= t_seq else 1
+            n_query_per_t = n_query // t_seq if n_query >= t_seq else 1
+            if n_query_per_t == 0 or n_context_per_t == 0:
+                return None
+            attn_tq = attn.reshape(t_seq, n_query_per_t, t_seq, n_context_per_t)
+            attn_tt = attn_tq.sum(dim=(1, 3)).float().numpy()  # (T, T)
+            row_sum = attn_tt.sum(axis=1, keepdims=True) + 1e-8
+            attn_tt /= row_sum
+            mx = attn_tt.max()
+            if mx < 1e-8 or np.isnan(mx):
+                return None
+            return (attn_tt / mx * 255).astype(np.uint8)
+
+        images = {}
+        for i, blk in enumerate(cross_attn_blocks):
+            for tag, weights in (("last", blk.last_attn_weights), ("first", blk.first_attn_weights)):
+                if weights is None:
+                    continue
+                heat = _make_heat(weights)
+                if heat is None:
+                    continue
+                images[f"{namespace}/cross_attn_block{i}_{tag}step"] = wandb.Image(
+                    heat, caption=f"Block {i} {tag} denoising step: rows=query time, cols=context time"
+                )
+
+        if images:
+            self.logger.experiment.log(images, step=self.global_step)
 
     # ---------------------------------------------------------------------
     # Data Preprocessing Utils
