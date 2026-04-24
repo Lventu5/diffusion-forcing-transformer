@@ -181,12 +181,18 @@ class CrossAttnBlock(nn.Module):
         context_dim: Optional[int] = None,
         dropout: float = 0.0,
         t_seq: int = 0,
+        frame_aligned: bool = True,
     ):
         super().__init__()
         _ = emb_dim  # unused: CrossAttnBlock does not use FiLM conditioning
         self.heads = heads
         dim_head = dim // heads
         self.t_seq = t_seq
+        # Per-frame cross-attention: each frame's spatial tokens attend only to their
+        # own frame's context token. This enforces temporal correspondence and prevents
+        # the attention-sink-to-position-0 pathology that occurs when all T context tokens
+        # are visible without any positional structure (no temporal RoPE).
+        self.frame_aligned = frame_aligned
         self.norm = Normalize(dim)
         self.context_norm = Normalize(context_dim or dim)
         self.q_proj = nn.Linear(dim, dim, bias=False)
@@ -194,8 +200,8 @@ class CrossAttnBlock(nn.Module):
         self.q_norm, self.k_norm = Normalize(dim_head), Normalize(dim_head)
         self.out = zero_module(nn.Linear(dim, dim, bias=True))
         self.dropout = nn.Dropout(dropout)
-        # Temporal 1D RoPE: shared T index for video Q tokens and context K tokens.
-        self.rope_t = RotaryEmbedding1D(dim_head, t_seq) if t_seq > 0 else None
+        # Temporal 1D RoPE: only used when frame_aligned=False.
+        self.rope_t = RotaryEmbedding1D(dim_head, t_seq) if (t_seq > 0 and not frame_aligned) else None
         # Set to True externally to capture first/last attention weights for visualization.
         self.store_attn_weights: bool = False
         self.first_attn_weights: Optional[Tensor] = None  # (B, heads, N, M) – first step
@@ -211,14 +217,34 @@ class CrossAttnBlock(nn.Module):
     ) -> Tensor:
         """
         Args:
-            x: (B, N, C) input tokens.
+            x: (B, N, C) input tokens, where N = T * spatial_tokens_per_frame.
             emb: (B, N, C) conditioning embedding (unused).
-            context: (B, M, Cc) context tokens.
-            context_mask: optional bool mask (B, M), True for valid tokens.
-            is_causal: if True, frame t only attends to context tokens <= t.
+            context: (B, T, Cc) context tokens — one per video frame.
+            context_mask: optional bool mask (B, T), True for valid tokens.
+            is_causal: if True (frame_aligned=False only), frame t attends to
+                       context tokens <= t.
         """
         _ = emb
-        residual = x
+        residual = x  # (B, N, C) — saved for residual addition at the end
+
+        if self.frame_aligned:
+            # Reshape so each frame's HW spatial tokens attend only to that frame's
+            # single context token. This eliminates the attention sink to position 0
+            # that arises when all frames compete over all T context tokens without
+            # any temporal positional structure.
+            B, N, C = x.shape
+            T = context.shape[1]
+            if N % T != 0:
+                raise ValueError(
+                    f"frame_aligned cross-attn requires N divisible by T (N={N}, T={T})."
+                )
+            HW = N // T
+            x = x.reshape(B * T, HW, C)
+            context = context.reshape(B * T, 1, context.shape[-1])
+            if context_mask is not None:
+                context_mask = context_mask.reshape(B * T, 1)
+            is_causal = False  # single context token per frame — causal masking N/A
+
         x = self.norm(x)
         context = self.context_norm(context)
 
@@ -253,7 +279,10 @@ class CrossAttnBlock(nn.Module):
         elif context_mask is not None:
             attn_mask = ~context_mask[:, None, None, :]
 
-        if self.store_attn_weights:
+        if self.store_attn_weights and not self.frame_aligned:
+            # Weight capture only makes sense in the full-context (non-frame-aligned) path
+            # where the (N_query × T_context) map carries information. In frame_aligned mode
+            # there is always exactly one context token per frame, so attention = 1.0 trivially.
             scale = q.shape[-1] ** -0.5
             scores = torch.matmul(q.float(), k.float().transpose(-2, -1)) * scale
             if attn_mask is not None:
@@ -270,9 +299,14 @@ class CrossAttnBlock(nn.Module):
             # so negate before passing (the masked_fill branch above is already correct).
             sdpa_mask = ~attn_mask if (attn_mask is not None and attn_mask.dtype == torch.bool) else attn_mask
             x = F.scaled_dot_product_attention(q, k, v, attn_mask=sdpa_mask, is_causal=False)
+
         x = rearrange(x, "b h n d -> b n (h d)")
         x = self.out(x)
         x = self.dropout(x)
+
+        if self.frame_aligned:
+            x = x.reshape(B, N, -1)  # restore (B, T*HW, C)
+
         return residual + x
 
 
@@ -324,6 +358,7 @@ class TransformerBlock(nn.Module):
         cross_attn_is_causal: bool = False,
         cross_attn_context_dim: Optional[int] = None,
         cross_attn_t_seq: int = 0,
+        cross_attn_frame_aligned: bool = True,
     ):
         super().__init__()
         self.rope = rope.ax2 if (rope is not None and use_axial) else rope
@@ -355,6 +390,7 @@ class TransformerBlock(nn.Module):
                 context_dim=cross_attn_context_dim or dim,
                 dropout=dropout,
                 t_seq=cross_attn_t_seq,
+                frame_aligned=cross_attn_frame_aligned,
             )
 
         self.mlp_out = nn.Sequential(

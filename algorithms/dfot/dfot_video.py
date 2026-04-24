@@ -419,12 +419,32 @@ class DFoTVideo(BasePytorchAlgo):
         """Training step"""
         xs, conditions, masks, *_ = batch
 
+        log_attn = (
+            is_rank_zero
+            and self.logger
+            and self.cfg.logging.grad_norm_freq
+            and self.global_step % self.cfg.logging.grad_norm_freq == 0
+        )
+        if log_attn:
+            for m in self.diffusion_model.modules():
+                if m.__class__.__name__ == "CrossAttnBlock":
+                    m.store_attn_weights = True
+                    m.first_attn_weights = None
+
         noise_levels, masks = self._get_training_noise_levels(xs, masks)
         xs_pred, loss = self.diffusion_model(
             xs,
             self._process_conditions(conditions),
             k=noise_levels,
         )
+
+        if log_attn:
+            self._log_cross_attn_map(namespace)
+            for m in self.diffusion_model.modules():
+                if m.__class__.__name__ == "CrossAttnBlock":
+                    m.store_attn_weights = False
+                    m.first_attn_weights = None
+                    m.last_attn_weights = None
 
         # Apply element-level spatial weight if available (set in on_after_batch_transfer).
         # loss shape: (B, T, C, H, W) — weight shape: (B, T, 1, H, W) → broadcasts over C.
@@ -507,6 +527,44 @@ class DFoTVideo(BasePytorchAlgo):
             f"global_step={self.global_step}"
         )
 
+    def _cross_attn_out_is_zero(self) -> bool:
+        """Return True if all cross-attention output projection weights are zero.
+
+        Used to detect the zero_module initialization state so we know whether
+        to re-initialize before phase-1 training begins.
+        """
+        for name, param in self.diffusion_model.named_parameters():
+            if "cross_attn" in name and name.endswith(".out.weight"):
+                if param.abs().max().item() > 1e-10:
+                    return False
+        return True
+
+    def _reinit_cross_attn_out(self) -> None:
+        """Re-initialize cross-attention output projections from zero to a small
+        normal distribution, enabling gradient flow to Q/K/V from training step 1.
+
+        Background: zero_module() zeros the output projection so that cross-attention
+        starts as a no-op (good for full training where backbone and cross-attn
+        co-adapt). But in phase-1 freeze, the frozen backbone cannot co-adapt, so
+        Q/K/V receive exactly zero gradients (d_loss/d_Q = d_loss/d_out · W_out.T = 0)
+        and the cross-attention can never bootstrap. Re-initializing W_out to a small
+        non-zero value (std=0.01) allows gradients to flow to Q/K/V while keeping the
+        initial cross-attention contribution small (~5-10% of backbone activations).
+        """
+        n_reinit = 0
+        for name, param in self.diffusion_model.named_parameters():
+            if "cross_attn" not in name:
+                continue
+            if name.endswith(".out.weight"):
+                torch.nn.init.normal_(param, std=0.01)
+                n_reinit += 1
+            elif name.endswith(".out.bias"):
+                torch.nn.init.zeros_(param)
+        rank_zero_print(
+            f"[freeze_schedule] Re-initialized {n_reinit} cross_attn.out.weight "
+            f"tensors from zero to N(0, 0.01) to unblock Q/K/V gradient flow."
+        )
+
     def configure_model(self) -> None:
         """Freeze non-cross-attn params before DDP wraps the model (phase 1).
 
@@ -518,6 +576,18 @@ class DFoTVideo(BasePytorchAlgo):
         """
         if self._freeze_schedule_steps() > 0:
             self._freeze_non_cross_attn()
+
+    def on_train_start(self) -> None:
+        """Re-initialize zero-init cross-attn output projections at phase-1 start.
+
+        Called after checkpoint loading but before the first training step.
+        Only fires when: (a) a phase-1 freeze schedule is active AND (b) the
+        cross_attn.out weights are still zero (i.e. we loaded from a converted
+        checkpoint where missing cross-attn keys were zero-filled, not from a
+        previously-trained cross-attn checkpoint).
+        """
+        if self._freeze_schedule_steps() > 0 and self._cross_attn_out_is_zero():
+            self._reinit_cross_attn_out()
 
     def on_train_batch_start(self, batch, batch_idx) -> None:
         """Switch from Phase 1 → Phase 2 when the step threshold is reached."""
@@ -1052,6 +1122,9 @@ class DFoTVideo(BasePytorchAlgo):
             n_context_per_t = n_context // t_seq if n_context >= t_seq else 1
             n_query_per_t = n_query // t_seq if n_query >= t_seq else 1
             if n_query_per_t == 0 or n_context_per_t == 0:
+                return None
+            # Guard against shape mismatch (e.g. frame_aligned mode stores trivial weights).
+            if n_query != t_seq * n_query_per_t or n_context != t_seq * n_context_per_t:
                 return None
             attn_tq = attn.reshape(t_seq, n_query_per_t, t_seq, n_context_per_t)
             attn_tt = attn_tq.sum(dim=(1, 3)).float().numpy()  # (T, T)

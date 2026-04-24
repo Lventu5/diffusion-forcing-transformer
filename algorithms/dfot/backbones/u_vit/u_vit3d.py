@@ -50,6 +50,7 @@ class UViT3D(BaseBackbone):
         cross_attn_context_dim = getattr(cfg, "cross_attn_context_dim", None)
         cross_attn_is_causal = getattr(cfg, "cross_attn_is_causal", False)
         cross_attn_t_seq = getattr(cfg, "cross_attn_t_seq", 0)
+        cross_attn_frame_aligned = getattr(cfg, "cross_attn_frame_aligned", True)
         self.pos_emb_type = cfg.pos_emb_type
         self.num_levels = len(channels)
         resolution = x_shape[-1]
@@ -139,6 +140,7 @@ class UViT3D(BaseBackbone):
                 cross_attn_context_dim=cross_attn_context_dim,
                 cross_attn_is_causal=cross_attn_is_causal,
                 cross_attn_t_seq=cross_attn_t_seq,
+                cross_attn_frame_aligned=cross_attn_frame_aligned,
             ),
         }
 
