@@ -1,0 +1,28 @@
+# Small UViT3D with cross-attention for the binary conditioning smoke test.
+# Designed to train in minutes on a single GPU.
+#
+# cross_attn_context_dim: 1 matches node_emb_dim in synthetic_binary dataset.
+# cross_attn_frame_aligned: false uses the ORIGINAL cross-attention path
+# (all T context tokens visible to all T*HW query tokens simultaneously).
+# This is intentional: the test validates the baseline code path.
+
+name: uvit3d_action_node_crossattn
+channels: [64, 128]
+emb_channels: 128
+patch_size: 2
+block_types: ["ResBlock", "CrossAttnTransformerBlock"]
+block_dropouts: [0.0, 0.0]
+num_updown_blocks: [2]
+num_mid_blocks: 4
+num_heads: 4
+pos_emb_type: rope
+use_checkpointing: [false, false]
+
+# Cross-attention context = 1-dim binary scalar.
+cross_attn_context_dim: 1
+# Original (non-frame-aligned) cross-attention: all context tokens visible.
+cross_attn_frame_aligned: false
+
+# No CFG dropout for the smoke test: keep conditioning fully on.
+external_cond_dropout: 0.0
+node_cond_dropout: 0.0

@@ -227,6 +227,15 @@ class CrossAttnBlock(nn.Module):
         _ = emb
         residual = x  # (B, N, C) — saved for residual addition at the end
 
+        # [shape-check] One-time print of cross-attention shapes to verify routing.
+        if not getattr(self, "_shape_checked", False):
+            self._shape_checked = True
+            print(
+                f"[shape-check] CrossAttnBlock: x={tuple(x.shape)} "
+                f"context={tuple(context.shape)} "
+                f"frame_aligned={self.frame_aligned}"
+            )
+
         if self.frame_aligned:
             # Reshape so each frame's HW spatial tokens attend only to that frame's
             # single context token. This eliminates the attention sink to position 0

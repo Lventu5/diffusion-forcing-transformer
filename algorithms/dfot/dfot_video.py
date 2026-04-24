@@ -406,6 +406,7 @@ class DFoTVideo(BasePytorchAlgo):
             assert (
                 not self.is_latent_video_vae
             ), "Masks should not be provided from the dataset when using VideoVAE."
+            masks = batch["masks"].bool().to(self.device)
         else:
             masks = torch.ones(*xs.shape[:2]).bool().to(self.device)
 
@@ -489,6 +490,19 @@ class DFoTVideo(BasePytorchAlgo):
             norms = grad_norm(self.diffusion_model, norm_type=2)
             # NOTE: `norms` need not be gathered, as they are already uniform across all devices
             self.log_dict(norms)
+
+            # [grad-check] Per-parameter gradient norms for cross-attn weights.
+            # W_out and kv_proj (W_V, W_K) should be non-zero; W_Q (q_proj) may be small.
+            if is_rank_zero:
+                for name, p in self.diffusion_model.named_parameters():
+                    if "cross_attn" not in name:
+                        continue
+                    g = p.grad
+                    g_norm = g.norm().item() if g is not None else float("nan")
+                    rank_zero_print(
+                        f"[grad-check] step={self.global_step}  {name}: "
+                        f"param_norm={p.norm().item():.4f}  grad_norm={g_norm:.6f}"
+                    )
 
     # ---------------------------------------------------------------------
     # Freeze schedule (two-phase cross-attn finetuning)
@@ -586,8 +600,22 @@ class DFoTVideo(BasePytorchAlgo):
         checkpoint where missing cross-attn keys were zero-filled, not from a
         previously-trained cross-attn checkpoint).
         """
+        # [load-check] Log cross-attn weight norms to verify checkpoint loaded correctly.
+        rank_zero_print("[load-check] Cross-attn parameter norms after checkpoint load:")
+        for name, p in self.diffusion_model.named_parameters():
+            if "cross_attn" in name:
+                rank_zero_print(
+                    f"  {name}: norm={p.norm().item():.4f}  max={p.abs().max().item():.6f}"
+                )
+
         if self._freeze_schedule_steps() > 0 and self._cross_attn_out_is_zero():
             self._reinit_cross_attn_out()
+            rank_zero_print("[load-check] Cross-attn norms AFTER reinit:")
+            for name, p in self.diffusion_model.named_parameters():
+                if "cross_attn" in name and "out" in name:
+                    rank_zero_print(
+                        f"  {name}: norm={p.norm().item():.4f}  max={p.abs().max().item():.6f}"
+                    )
 
     def on_train_batch_start(self, batch, batch_idx) -> None:
         """Switch from Phase 1 → Phase 2 when the step threshold is reached."""
@@ -1177,6 +1205,8 @@ class DFoTVideo(BasePytorchAlgo):
                 mask = torch.ones_like(conditions)
                 mask[:, :1, : self.external_cond_dim] = 0
                 return conditions * mask
+            case None | "none":
+                return conditions
             case _:
                 raise NotImplementedError(
                     f"External condition processing {self.cfg.external_cond_processing} is not implemented."

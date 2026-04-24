@@ -112,6 +112,21 @@ class UViT3DActionNodeCrossAttn(UViT3DAction):
 
             external_cond = action_cond
 
+        # [ctx-check] One-time shape/value check to verify context_tokens are correct.
+        if not getattr(self, "_ctx_checked", False):
+            self._ctx_checked = True
+            if context_tokens is not None:
+                var_across_t = context_tokens.std(dim=1).mean().item()
+                print(
+                    f"[ctx-check] context_tokens: shape={tuple(context_tokens.shape)} "
+                    f"mean={context_tokens.mean().item():.4f} "
+                    f"std={context_tokens.std().item():.4f} "
+                    f"std_across_T={var_across_t:.4f} "
+                    f"(near-zero std_across_T → all frames same embedding)"
+                )
+            else:
+                print("[ctx-check] context_tokens is None — no node conditioning active")
+
         # Delegate to UViT3D.forward (UViT3DAction does not override forward).
         # Action cond is added to noise-level emb as usual; text goes via
         # cross-attention through context_tokens.

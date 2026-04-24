@@ -20,3 +20,4 @@ from .file_explorer_node_cond import (
     FileExplorerNodeCondAdvancedVideoDataset,
     FileExplorerNodeCondSimpleVideoDataset,
 )
+from .synthetic_binary import SyntheticBinaryDataset
