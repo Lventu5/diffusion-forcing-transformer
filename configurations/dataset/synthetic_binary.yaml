@@ -1,8 +1,8 @@
 # Synthetic binary conditioning dataset for cross-attention smoke test.
-# No real data needed — generates black/white frames on the fly.
+# No real data needed — generates per-frame black/white targets on the fly.
 #
 # external_cond layout: [0, 0, 0, label]  (3 action zeros + 1 binary)
-# The label (0.0 or 1.0) is the sole cross-attention context token.
+# The label is per-frame (0.0 or 1.0) and is the sole cross-attention token.
 
 defaults:
   - base_video
@@ -26,7 +26,7 @@ external_cond_stack: false
 # "none" = pass conditions through unchanged (no first-frame masking).
 external_cond_processing: none
 
-n_samples: 2000
+n_samples: 200000000
 
 data_mean: 0.5
 data_std: 0.5

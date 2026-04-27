@@ -8,7 +8,7 @@ from datasets.video import (
     FileExplorerNodeCondAdvancedVideoDataset,
     SyntheticBinaryDataset,
 )
-from algorithms.dfot import DFoTVideo, DFoTVideoPose
+from algorithms.dfot import DFoTVideo, DFoTVideoBinaryEval, DFoTVideoPose
 from .base_exp import BaseLightningExperiment
 from .data_modules.utils import _data_module_cls
 
@@ -20,6 +20,7 @@ class VideoGenerationExperiment(BaseLightningExperiment):
 
     compatible_algorithms = dict(
         dfot_video=DFoTVideo,
+        dfot_video_binary_eval=DFoTVideoBinaryEval,
         dfot_video_pose=DFoTVideoPose,
         sd_video=DFoTVideo,
         sd_video_3d=DFoTVideoPose,

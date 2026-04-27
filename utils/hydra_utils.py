@@ -1,21 +1,27 @@
 from typing import Optional
+import json
 import os
 from omegaconf import OmegaConf
 
 
-def _dict_to_str(d: dict) -> str:
-    """
-    Convert a dictionary to a string without quotes.
-    """
-    output = "{"
-    for key, value in d.items():
-        if value is None:
-            value = "null"
-        output += (
-            f"{key}: {_dict_to_str(value) if isinstance(value, dict) else value}, "
-        )
-    output = output[:-2] + "}"
-    return output
+def _value_to_cli(value) -> str:
+    """Serialize a Python value into a Hydra CLI override value."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (list, dict)):
+        return json.dumps(value)
+    return str(value)
+
+
+def _append_cli_overrides(cli: list[str], key: str, value) -> None:
+    """Flatten nested dictionaries into dotted Hydra overrides."""
+    if isinstance(value, dict):
+        for child_key, child_value in value.items():
+            _append_cli_overrides(cli, f"{key}.{child_key}", child_value)
+        return
+    cli.append(f"++{key}={_value_to_cli(value)}")
 
 
 def _yaml_to_cli(
@@ -28,11 +34,8 @@ def _yaml_to_cli(
     cfg = OmegaConf.load(yaml_path)
     cli = []
     for key, value in OmegaConf.to_container(cfg).items():
-        if value is None:
-            value = "null"
-        cli.append(
-            f"++{prefix + '.' if prefix else ''}{key}={_dict_to_str(value) if isinstance(value, dict) else value}"
-        )
+        full_key = f"{prefix}.{key}" if prefix else key
+        _append_cli_overrides(cli, full_key, value)
     return cli
 
 

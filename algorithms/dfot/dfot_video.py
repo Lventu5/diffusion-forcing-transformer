@@ -558,25 +558,23 @@ class DFoTVideo(BasePytorchAlgo):
         normal distribution, enabling gradient flow to Q/K/V from training step 1.
 
         Background: zero_module() zeros the output projection so that cross-attention
-        starts as a no-op (good for full training where backbone and cross-attn
-        co-adapt). But in phase-1 freeze, the frozen backbone cannot co-adapt, so
-        Q/K/V receive exactly zero gradients (d_loss/d_Q = d_loss/d_out · W_out.T = 0)
-        and the cross-attention can never bootstrap. Re-initializing W_out to a small
-        non-zero value (std=0.01) allows gradients to flow to Q/K/V while keeping the
-        initial cross-attention contribution small (~5-10% of backbone activations).
+        starts as a no-op. With frame_aligned=False (non-trivial softmax over T keys),
+        grad_input = grad_output @ W_out.T = 0 when W_out = 0, so Q/K/V receive zero
+        gradients at step 0. Reinitializing W_out to N(0, 0.1) unblocks gradient flow
+        while keeping the initial cross-attention contribution small.
         """
         n_reinit = 0
         for name, param in self.diffusion_model.named_parameters():
             if "cross_attn" not in name:
                 continue
             if name.endswith(".out.weight"):
-                torch.nn.init.normal_(param, std=0.01)
+                torch.nn.init.normal_(param, std=0.1)
                 n_reinit += 1
             elif name.endswith(".out.bias"):
                 torch.nn.init.zeros_(param)
         rank_zero_print(
             f"[freeze_schedule] Re-initialized {n_reinit} cross_attn.out.weight "
-            f"tensors from zero to N(0, 0.01) to unblock Q/K/V gradient flow."
+            f"tensors from zero to N(0, 0.1) to unblock Q/K/V gradient flow."
         )
 
     def configure_model(self) -> None:
@@ -592,13 +590,12 @@ class DFoTVideo(BasePytorchAlgo):
             self._freeze_non_cross_attn()
 
     def on_train_start(self) -> None:
-        """Re-initialize zero-init cross-attn output projections at phase-1 start.
+        """Re-initialize zero-init cross-attn output projections before training.
 
         Called after checkpoint loading but before the first training step.
-        Only fires when: (a) a phase-1 freeze schedule is active AND (b) the
-        cross_attn.out weights are still zero (i.e. we loaded from a converted
-        checkpoint where missing cross-attn keys were zero-filled, not from a
-        previously-trained cross-attn checkpoint).
+        Fires whenever cross_attn.out weights are still zero (fresh init or converted
+        checkpoint with zero-filled missing keys). Skipped when resuming a run that
+        already has trained cross-attn weights.
         """
         # [load-check] Log cross-attn weight norms to verify checkpoint loaded correctly.
         rank_zero_print("[load-check] Cross-attn parameter norms after checkpoint load:")
@@ -608,7 +605,7 @@ class DFoTVideo(BasePytorchAlgo):
                     f"  {name}: norm={p.norm().item():.4f}  max={p.abs().max().item():.6f}"
                 )
 
-        if self._freeze_schedule_steps() > 0 and self._cross_attn_out_is_zero():
+        if self._cross_attn_out_is_zero():
             self._reinit_cross_attn_out()
             rank_zero_print("[load-check] Cross-attn norms AFTER reinit:")
             for name, p in self.diffusion_model.named_parameters():

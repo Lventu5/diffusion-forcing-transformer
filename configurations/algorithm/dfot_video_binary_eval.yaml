@@ -1,0 +1,9 @@
+# Binary-test-only DFoT algorithm config.
+# Extends the standard dfot_video config without changing baseline experiments.
+
+defaults:
+  - dfot_video
+
+logging:
+  condition_ablations: false
+  condition_ablation_max_batches: 1

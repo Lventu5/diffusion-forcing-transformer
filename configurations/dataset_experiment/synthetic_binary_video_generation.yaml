@@ -1,0 +1,42 @@
+# @package _global_
+# Experiment config for synthetic black/white video generation with binary
+# conditioning and cross-attention.
+
+experiment:
+  reload_dataloaders_every_n_epochs: 0
+  training:
+    lr: 1e-4
+    precision: bf16-mixed
+    batch_size: 4
+    max_epochs: 5
+    checkpointing:
+      every_n_train_steps: null
+      every_n_epochs: 999999999
+    optim:
+      accumulate_grad_batches: 2
+      gradient_clip_val: 1.0
+    data:
+      num_workers: 16
+  validation:
+    batch_size: 16
+    val_every_n_step: 200
+    val_every_n_epoch: 999999999
+    limit_batch: 1.0
+    precision: bf16-mixed
+    num_sanity_val_steps: 0
+    data:
+      num_workers: 4
+
+algorithm:
+  diffusion:
+    loss_weighting:
+      strategy: sigmoid
+      sigmoid_bias: -1.0
+    training_schedule:
+      name: cosine
+      shift: 0.125
+  backbone:
+    name: uvit3d_binary_test
+    external_cond_dropout: 0.1
+    cross_attn_t_seq: 4
+    use_checkpointing: [false, false, false, false]

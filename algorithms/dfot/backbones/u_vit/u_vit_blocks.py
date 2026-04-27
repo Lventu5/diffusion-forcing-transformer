@@ -188,24 +188,31 @@ class CrossAttnBlock(nn.Module):
         self.heads = heads
         dim_head = dim // heads
         self.t_seq = t_seq
+        self.context_dim = context_dim or dim
         # Per-frame cross-attention: each frame's spatial tokens attend only to their
-        # own frame's context token. This enforces temporal correspondence and prevents
-        # the attention-sink-to-position-0 pathology that occurs when all T context tokens
-        # are visible without any positional structure (no temporal RoPE).
+        # own frame's context tokens. This enforces temporal correspondence and prevents
+        # the attention-sink-to-position-0 pathology when all T context tokens compete.
         self.frame_aligned = frame_aligned
         self.norm = Normalize(dim)
-        self.context_norm = Normalize(context_dim or dim)
+        self.context_norm = Normalize(self.context_dim)
         self.q_proj = nn.Linear(dim, dim, bias=False)
-        self.kv_proj = nn.Linear(context_dim or dim, dim * 2, bias=False)
+        self.kv_proj = nn.Linear(self.context_dim, dim * 2, bias=False)
         self.q_norm, self.k_norm = Normalize(dim_head), Normalize(dim_head)
         self.out = zero_module(nn.Linear(dim, dim, bias=True))
         self.dropout = nn.Dropout(dropout)
-        # Temporal 1D RoPE: only used when frame_aligned=False.
+        # Temporal 1D RoPE is needed only when all frames can attend to all context frames.
+        # Frame-aligned mode encodes temporal correspondence structurally.
         self.rope_t = RotaryEmbedding1D(dim_head, t_seq) if (t_seq > 0 and not frame_aligned) else None
         # Set to True externally to capture first/last attention weights for visualization.
         self.store_attn_weights: bool = False
         self.first_attn_weights: Optional[Tensor] = None  # (B, heads, N, M) – first step
         self.last_attn_weights: Optional[Tensor] = None   # (B, heads, N, M) – last step
+
+        if not self.frame_aligned and self.t_seq <= 0:
+            raise ValueError(
+                "Non-frame-aligned cross-attention requires temporal encoding. "
+                "Set backbone.cross_attn_t_seq to the sequence length (e.g. dataset.max_frames)."
+            )
 
     def forward(
         self,
@@ -219,8 +226,8 @@ class CrossAttnBlock(nn.Module):
         Args:
             x: (B, N, C) input tokens, where N = T * spatial_tokens_per_frame.
             emb: (B, N, C) conditioning embedding (unused).
-            context: (B, T, Cc) context tokens — one per video frame.
-            context_mask: optional bool mask (B, T), True for valid tokens.
+            context: (B, T*K, Cc) context tokens, grouped by frame.
+            context_mask: optional bool mask (B, T) or (B, T*K), True for valid tokens.
             is_causal: if True (frame_aligned=False only), frame t attends to
                        context tokens <= t.
         """
@@ -233,26 +240,52 @@ class CrossAttnBlock(nn.Module):
             print(
                 f"[shape-check] CrossAttnBlock: x={tuple(x.shape)} "
                 f"context={tuple(context.shape)} "
-                f"frame_aligned={self.frame_aligned}"
+                f"frame_aligned={self.frame_aligned} "
+                f"t_seq={self.t_seq} "
+                f"context_dim={self.context_dim}"
+            )
+
+        if context.shape[-1] != self.context_dim:
+            raise ValueError(
+                "Cross-attention context dim mismatch: "
+                f"got context.shape[-1]={context.shape[-1]}, expected {self.context_dim}. "
+                "Set backbone.cross_attn_context_dim to dataset.node_emb_dim/precomputed embedding dim."
             )
 
         if self.frame_aligned:
             # Reshape so each frame's HW spatial tokens attend only to that frame's
-            # single context token. This eliminates the attention sink to position 0
-            # that arises when all frames compete over all T context tokens without
-            # any temporal positional structure.
+            # context token(s). Context may be one token per frame (B, T, C) or a
+            # flattened per-frame token map (B, T*K, C), matching the supervisor VAE path.
             B, N, C = x.shape
-            T = context.shape[1]
+            M = context.shape[1]
+            T = self.t_seq if self.t_seq > 0 else M
             if N % T != 0:
                 raise ValueError(
                     f"frame_aligned cross-attn requires N divisible by T (N={N}, T={T})."
                 )
+            if M % T != 0:
+                raise ValueError(
+                    "frame_aligned cross-attn requires context tokens divisible by T "
+                    f"(M={M}, T={T}). Set backbone.cross_attn_t_seq to the video frame count."
+                )
             HW = N // T
+            context_tokens_per_frame = M // T
             x = x.reshape(B * T, HW, C)
-            context = context.reshape(B * T, 1, context.shape[-1])
+            context = context.reshape(B * T, context_tokens_per_frame, context.shape[-1])
             if context_mask is not None:
-                context_mask = context_mask.reshape(B * T, 1)
-            is_causal = False  # single context token per frame — causal masking N/A
+                if context_mask.shape[-1] == T and context_tokens_per_frame != 1:
+                    context_mask = context_mask.repeat_interleave(
+                        context_tokens_per_frame, dim=-1
+                    )
+                if context_mask.shape[-1] != M:
+                    raise ValueError(
+                        "frame_aligned cross-attn context_mask must have T or M tokens "
+                        f"(got {context_mask.shape[-1]}, T={T}, M={M})."
+                    )
+                context_mask = context_mask.reshape(B, T, context_tokens_per_frame).reshape(
+                    B * T, context_tokens_per_frame
+                )
+            is_causal = False  # per-frame routing already enforces temporal alignment
 
         x = self.norm(x)
         context = self.context_norm(context)
@@ -265,8 +298,9 @@ class CrossAttnBlock(nn.Module):
 
         if self.rope_t is not None:
             n_q, n_k = q.shape[2], k.shape[2]
-            t_idx_q = torch.arange(n_q, device=q.device) // (n_q // self.t_seq)
-            t_idx_k = torch.arange(n_k, device=k.device) // (n_k // self.t_seq)
+            # Map token indices to temporal bins in [0, t_seq-1] without integer-division edge cases.
+            t_idx_q = (torch.arange(n_q, device=q.device) * self.t_seq // max(n_q, 1)).clamp(max=self.t_seq - 1)
+            t_idx_k = (torch.arange(n_k, device=k.device) * self.t_seq // max(n_k, 1)).clamp(max=self.t_seq - 1)
             freqs_q = self.rope_t.freqs[t_idx_q][None, None]  # (1, 1, n_q, dim_head)
             freqs_k = self.rope_t.freqs[t_idx_k][None, None]  # (1, 1, n_k, dim_head)
             q = q * freqs_q.cos() + _rotate_half(q) * freqs_q.sin()

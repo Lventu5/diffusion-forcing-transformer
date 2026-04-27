@@ -22,6 +22,8 @@ use_checkpointing: [false, false]
 cross_attn_context_dim: 1
 # Original (non-frame-aligned) cross-attention: all context tokens visible.
 cross_attn_frame_aligned: false
+# Temporal RoPE bins = number of video frames.
+cross_attn_t_seq: 4
 
 # No CFG dropout for the smoke test: keep conditioning fully on.
 external_cond_dropout: 0.0

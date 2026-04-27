@@ -1,14 +1,10 @@
-"""Synthetic black/white binary conditioning dataset — cross-attention smoke test.
+"""Synthetic binary conditioning dataset — per-frame cross-attention sanity test.
 
-Each sample is either all-black (label=0) or all-white (label=1) video frames.
-The binary label enters cross-attention as a scalar context token (the last dim
-of external_cond, after 3 zero-filled action dims).
+Each sample contains a binary condition per frame (0/1). Frame pixels directly
+follow that per-frame condition: 0 -> black frame, 1 -> white frame.
 
-Expected outcome after ~500 steps:
-  - loss drops to near zero
-  - model generates black frames when conditioned on 0, white when conditioned on 1
-
-If this fails, the cross-attention pathway has a bug independent of real data.
+The key property is that conditions are not constant over the clip, so the model
+cannot solve the task by treating the whole trajectory as a single class.
 """
 
 from __future__ import annotations
@@ -19,30 +15,36 @@ from torch.utils.data import Dataset
 
 
 class SyntheticBinaryDataset(Dataset):
-    """All-black or all-white frames with binary cross-attention conditioning."""
+    """Black/white frames with per-frame binary cross-attention conditioning."""
 
     def __init__(self, cfg: DictConfig, split: str = "training", **kwargs) -> None:
-        self.n_samples: int = getattr(cfg, "n_samples", 2000)
+        self.n_samples: int = getattr(cfg, "n_samples", 200000)
         C, H, W = cfg.observation_shape
         self.T = cfg.max_frames
         self.C, self.H, self.W = int(C), int(H), int(W)
         self.ext_dim: int = int(cfg.external_cond_dim)
+        split_offsets = {"training": 0, "validation": 10_000_000, "test": 20_000_000}
+        self.seed_offset = split_offsets.get(split, 30_000_000)
 
     def __len__(self) -> int:
         return self.n_samples
 
     def __getitem__(self, idx: int) -> dict:
-        label = float(idx % 2)  # 0 = black, 1 = white, strictly alternating
+        # Deterministic per-sample RNG gives stable labels while changing over time.
+        generator = torch.Generator().manual_seed(self.seed_offset + int(idx))
+        labels = torch.randint(0, 2, (self.T,), generator=generator, dtype=torch.long)
+        if self.T > 1 and bool((labels == labels[0]).all()):
+            # Guarantee at least one transition so conditions are not clip-constant.
+            labels[-1] = 1 - labels[0]
 
-        # Video: (T, C, H, W) in [0, 1]; normalized to [-1, 1] by on_after_batch_transfer
-        videos = torch.full(
-            (self.T, self.C, self.H, self.W), label, dtype=torch.float32
-        )
+        # Video: (T, C, H, W) in [0, 1]; normalized to [-1, 1] by on_after_batch_transfer.
+        labels_f = labels.to(torch.float32)
+        videos = labels_f[:, None, None, None].expand(self.T, self.C, self.H, self.W)
 
         # Cond: (T, ext_dim)
         #   dims 0..2  : zero action placeholders
-        #   dim  -1    : binary label fed as cross-attention context token
+        #   dim  -1    : per-frame binary label fed as cross-attention context token
         conds = torch.zeros(self.T, self.ext_dim, dtype=torch.float32)
-        conds[:, -1] = label
+        conds[:, -1] = labels_f
 
         return {"videos": videos, "conds": conds}

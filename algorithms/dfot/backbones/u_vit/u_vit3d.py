@@ -49,7 +49,7 @@ class UViT3D(BaseBackbone):
         num_heads = cfg.num_heads
         cross_attn_context_dim = getattr(cfg, "cross_attn_context_dim", None)
         cross_attn_is_causal = getattr(cfg, "cross_attn_is_causal", False)
-        cross_attn_t_seq = getattr(cfg, "cross_attn_t_seq", 0)
+        configured_cross_attn_t_seq = getattr(cfg, "cross_attn_t_seq", None)
         cross_attn_frame_aligned = getattr(cfg, "cross_attn_frame_aligned", True)
         self.pos_emb_type = cfg.pos_emb_type
         self.num_levels = len(channels)
@@ -57,6 +57,11 @@ class UViT3D(BaseBackbone):
         self.is_transformers = [block_type != "ResBlock" for block_type in block_types]
         self.use_checkpointing = list(cfg.use_checkpointing)
         self.temporal_length = max_tokens
+        cross_attn_t_seq = (
+            self.temporal_length
+            if configured_cross_attn_t_seq is None or configured_cross_attn_t_seq <= 0
+            else configured_cross_attn_t_seq
+        )
 
         # ------------------------------ Initialization ---------------------------------
 
