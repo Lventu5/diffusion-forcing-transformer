@@ -560,21 +560,22 @@ class DFoTVideo(BasePytorchAlgo):
         Background: zero_module() zeros the output projection so that cross-attention
         starts as a no-op. With frame_aligned=False (non-trivial softmax over T keys),
         grad_input = grad_output @ W_out.T = 0 when W_out = 0, so Q/K/V receive zero
-        gradients at step 0. Reinitializing W_out to N(0, 0.1) unblocks gradient flow
-        while keeping the initial cross-attention contribution small.
+        gradients at step 0. Reinitializing W_out to N(0, 0.01) unblocks gradient flow
+        while keeping the initial cross-attention contribution small (output noise per
+        element ≈ 0.01 × sqrt(dim) — much smaller than activations, safe with frozen backbone).
         """
         n_reinit = 0
         for name, param in self.diffusion_model.named_parameters():
             if "cross_attn" not in name:
                 continue
             if name.endswith(".out.weight"):
-                torch.nn.init.normal_(param, std=0.1)
+                torch.nn.init.normal_(param, std=0.01)
                 n_reinit += 1
             elif name.endswith(".out.bias"):
                 torch.nn.init.zeros_(param)
         rank_zero_print(
             f"[freeze_schedule] Re-initialized {n_reinit} cross_attn.out.weight "
-            f"tensors from zero to N(0, 0.1) to unblock Q/K/V gradient flow."
+            f"tensors from zero to N(0, 0.01) to unblock Q/K/V gradient flow."
         )
 
     def configure_model(self) -> None:
