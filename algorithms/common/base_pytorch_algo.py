@@ -263,8 +263,6 @@ class BasePytorchAlgo(pl.LightningModule, ABC):
         if self.trainer.world_size == 1:
             return apply_to_collection(data, torch.Tensor, lambda x: x.to(self.device))
 
-        # synchronize before gathering
-        torch.distributed.barrier()
         gathered_data = self.all_gather(data)
 
         # (r ... b ...) -> (... (r b) ...)

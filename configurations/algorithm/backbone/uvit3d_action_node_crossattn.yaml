@@ -28,7 +28,7 @@ cross_attn_context_dim: 4096
 # Per-frame cross-attention: each frame's spatial tokens attend only to their own
 # frame's context token (one node embedding per frame). This prevents the attention
 # sink to position 0 that occurs without temporal positional structure (no RoPE).
-cross_attn_frame_aligned: false
+cross_attn_frame_aligned: true
 # Temporal frame count for cross-attention. 0 means auto-use model temporal_length
 # (same as supervisor code). For non-frame-aligned mode this drives temporal RoPE;
 # for frame-aligned mode this groups flattened context tokens as T frames.

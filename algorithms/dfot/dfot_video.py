@@ -686,7 +686,10 @@ class DFoTVideo(BasePytorchAlgo):
                 on_step=False,
                 on_epoch=True,
                 prog_bar=True,
-                sync_dist=True,
+                # Metric modules (FID/FVD/IS/...) already maintain distributed
+                # states and synchronize on compute; forcing logger-level
+                # sync_dist here can add a redundant cross-rank sync tail.
+                sync_dist=False,
             )
         if self.semantic_metric is not None:
             self.semantic_metric.reset()
@@ -729,8 +732,6 @@ class DFoTVideo(BasePytorchAlgo):
                 (0, 0, 0, 0, 0, 0, 0, gt_videos.shape[1] - recons.shape[1], 0, 0),
             )
 
-        gt_videos, recons = self.gather_data((gt_videos, recons))
-
         if not (
             is_rank_zero
             and self.logger
@@ -738,6 +739,9 @@ class DFoTVideo(BasePytorchAlgo):
         ):
             return
 
+        # Visualization-only logging does not need cross-rank gathering.
+        # Keeping this local to rank 0 avoids a distributed sync tail at the
+        # end of validation before training resumes.
         num_videos_to_log = min(
             self.logging.max_num_videos - self.num_logged_videos,
             gt_videos.shape[0],

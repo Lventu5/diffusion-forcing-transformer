@@ -11,7 +11,19 @@ import torch.distributed as dist
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from utils.print_utils import print_once
 
-is_rank_zero = rank_zero_only.rank == 0
+
+class _IsRankZero:
+    """Dynamic rank-zero predicate.
+
+    `rank_zero_only.rank` is assigned by Lightning during runtime. Capturing it
+    at import time can freeze an incorrect value in worker processes.
+    """
+
+    def __bool__(self) -> bool:
+        return rank_zero_only.rank == 0
+
+
+is_rank_zero = _IsRankZero()
 
 rank_zero_print = rank_zero_only(print)
 rank_zero_print_once = rank_zero_only(print_once)
