@@ -1,3 +1,4 @@
+import inspect
 from typing import Optional, Callable, Literal
 from collections import namedtuple
 from omegaconf import DictConfig
@@ -84,6 +85,27 @@ class DiscreteDiffusion(nn.Module):
             external_cond_dim=self.external_cond_dim,
             use_causal_mask=self.use_causal_mask,
         )
+        self._model_accepts_node_cond_mask = (
+            "node_cond_mask" in inspect.signature(self.model.forward).parameters
+        )
+
+    def _call_model(
+        self,
+        x,
+        k,
+        external_cond=None,
+        external_cond_mask=None,
+        node_cond_mask=None,
+    ):
+        if self._model_accepts_node_cond_mask:
+            return self.model(
+                x,
+                k,
+                external_cond,
+                external_cond_mask,
+                node_cond_mask=node_cond_mask,
+            )
+        return self.model(x, k, external_cond, external_cond_mask)
 
     def _build_buffer(self):
         betas = make_beta_schedule(
@@ -165,7 +187,7 @@ class DiscreteDiffusion(nn.Module):
         return rearrange(x, f"... -> ...{' 1' * len(self.x_shape)}")
 
     def model_predictions(self, x, k, external_cond=None, external_cond_mask=None, node_cond_mask=None):
-        model_output = self.model(x, k, external_cond, external_cond_mask, node_cond_mask=node_cond_mask)
+        model_output = self._call_model(x, k, external_cond, external_cond_mask, node_cond_mask)
 
         if self.objective == "pred_noise":
             pred_noise = torch.clamp(model_output, -self.clip_noise, self.clip_noise)

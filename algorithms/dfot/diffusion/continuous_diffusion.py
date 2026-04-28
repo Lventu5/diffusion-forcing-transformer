@@ -121,8 +121,12 @@ class ContinuousDiffusion(DiscreteDiffusion):
             min=self.training_schedule.min_logsnr,
             max=self.training_schedule.max_logsnr,
         )
-        model_output = self.model(
-            x, self.precond_scale * logsnr_k, external_cond, external_cond_mask, node_cond_mask=node_cond_mask
+        model_output = self._call_model(
+            x,
+            self.precond_scale * logsnr_k,
+            external_cond,
+            external_cond_mask,
+            node_cond_mask,
         )
 
         if self.objective == "pred_noise":
