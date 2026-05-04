@@ -134,3 +134,20 @@ element_loss:
   text_boost: 50.0    # loss multiplier inside OCR text bboxes
   text_min_confidence: 0.5
   text_padding_px: 2
+
+# Graph-diff change-mask spatial loss weighting.
+# Cache files are produced by scripts/entrypoints/dfot/precompute_change_masks_cache.py.
+change_mask_loss:
+  enabled: false
+  cache_dir: ""       # path to directory of per-trajectory *.npz files
+  base_weight: 1.0    # loss multiplier outside changed regions
+  changed_boost: 5.0  # loss multiplier inside changed regions
+
+# REPAINT-style inpainting for unchanged regions.
+# At each sampling step, blends model predictions with noised reference frames
+# using change masks, preserving unchanged pixel regions.
+# Requires change masks to be available at inference time (computed from action graph).
+inpainting:
+  enabled: false
+  cache_dir: ""       # path to directory of per-trajectory *.npz files (change masks)
+  blend_alpha: 1.0    # blend factor for changed regions (1.0 = hard mask, <1.0 = soft blend)

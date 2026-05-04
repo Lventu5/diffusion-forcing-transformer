@@ -103,7 +103,9 @@ class DFoTVideo(BasePytorchAlgo):
         self.semantic_metric = None
         self._semantic_batch_metadata = None
         self.element_loss_weighter = None
+        self.change_mask_loss_weighter = None
         self._element_spatial_weight: Optional[Tensor] = None
+        self._change_mask_spatial_weight: Optional[Tensor] = None
 
         super().__init__(cfg)
 
@@ -143,6 +145,7 @@ class DFoTVideo(BasePytorchAlgo):
         )
         self.register_data_mean_std(self.cfg.data_mean, self.cfg.data_std)
         self._build_element_loss_weighter()
+        self._build_change_mask_loss_weighter()
 
         # 2. VAE model
         if self.is_latent_diffusion and self.is_latent_online:
@@ -283,6 +286,32 @@ class DFoTVideo(BasePytorchAlgo):
             )
         )
 
+    def _build_change_mask_loss_weighter(self) -> None:
+        """
+        Initialise graph-diff change-mask spatial weighting when configured.
+
+        Requires dataset ``include_clip_metadata: true`` so each batch carries
+        video_path / frame-index metadata.  Missing metadata or cache entries
+        leave loss unchanged for that batch/trajectory.
+        """
+        cm_cfg = getattr(self.cfg, "change_mask_loss", None)
+        if cm_cfg is None or not getattr(cm_cfg, "enabled", False):
+            return
+
+        from ui_sim.dfot_simulator.change_mask_loss import ChangeMaskLossWeighter
+
+        self.change_mask_loss_weighter = ChangeMaskLossWeighter(
+            cache_dir=cm_cfg.cache_dir,
+            base_weight=float(getattr(cm_cfg, "base_weight", 1.0)),
+            changed_boost=float(getattr(cm_cfg, "changed_boost", 5.0)),
+        )
+        rank_zero_print(
+            cyan(
+                f"[change_mask_loss] enabled — boost={cm_cfg.changed_boost}x, "
+                f"cache={cm_cfg.cache_dir}"
+            )
+        )
+
     # ---------------------------------------------------------------------
     # Length-related Properties and Utils
     # NOTE: "Frame" and "Token" should be distinguished carefully.
@@ -386,14 +415,21 @@ class DFoTVideo(BasePytorchAlgo):
         # self._semantic_batch_metadata — so the return tuple stays unchanged
         # and _eval_denoising's hard 4-tuple unpack is not affected.
         self._element_spatial_weight = None
-        if self.element_loss_weighter is not None and self.trainer.training:
-            clip_meta = batch.get("clip_metadata")
-            if clip_meta is not None:
-                B = xs.shape[0]
-                H, W = xs.shape[-2], xs.shape[-1]
-                meta_list = _unbatch_clip_metadata(clip_meta, B)
+        self._change_mask_spatial_weight = None
+        clip_meta = batch.get("clip_metadata")
+        if clip_meta is not None and self.trainer.training:
+            B = xs.shape[0]
+            H, W = xs.shape[-2], xs.shape[-1]
+            meta_list = _unbatch_clip_metadata(clip_meta, B)
+            if self.element_loss_weighter is not None:
                 self._element_spatial_weight = (
                     self.element_loss_weighter.build_batch_weight_map(
+                        meta_list, H, W, xs.device
+                    )
+                )
+            if self.change_mask_loss_weighter is not None:
+                self._change_mask_spatial_weight = (
+                    self.change_mask_loss_weighter.build_batch_weight_map(
                         meta_list, H, W, xs.device
                     )
                 )
@@ -460,6 +496,18 @@ class DFoTVideo(BasePytorchAlgo):
                 )
             loss = loss * self._element_spatial_weight
             self._element_spatial_weight = None  # consume to avoid stale state
+
+        if self._change_mask_spatial_weight is not None:
+            if batch_idx % self.cfg.logging.loss_freq == 0:
+                self.log(
+                    "training/change_mask_weight_mean",
+                    self._change_mask_spatial_weight.mean(),
+                    on_step=True,
+                    on_epoch=False,
+                    sync_dist=True,
+                )
+            loss = loss * self._change_mask_spatial_weight
+            self._change_mask_spatial_weight = None
 
         loss = self._reweight_loss(loss, masks)
 
