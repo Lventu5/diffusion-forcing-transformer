@@ -102,6 +102,7 @@ class DFoTVideo(BasePytorchAlgo):
         self.generator = None
         self.semantic_metric = None
         self.element_quality_metric = None
+        self.rollout_saver = None
         self._semantic_batch_metadata = None
         self.element_loss_weighter = None
         self.change_mask_loss_weighter = None
@@ -180,6 +181,7 @@ class DFoTVideo(BasePytorchAlgo):
                     )
         self._build_semantic_metrics()
         self._build_element_quality_metrics()
+        self._build_rollout_saver()
 
     def configure_optimizers(self):
         transition_params = list(self.diffusion_model.parameters())
@@ -273,6 +275,20 @@ class DFoTVideo(BasePytorchAlgo):
                 cyan("OCR zone quality metrics enabled:"),
                 self.logging.get("ocr_cache_dir"),
             )
+
+    def _build_rollout_saver(self) -> None:
+        save_dir = self.logging.get("rollout_save_dir", None)
+        if not save_dir or str(save_dir).strip() == "":
+            return
+
+        from pathlib import Path
+
+        from ui_sim.dfot_simulator.evaluation.dfot_validation_semantics import (
+            DfotRolloutSaver,
+        )
+
+        self.rollout_saver = DfotRolloutSaver(Path(save_dir), self.n_context_frames)
+        rank_zero_print(cyan("Rollout saver enabled →"), save_dir)
 
     def _build_element_loss_weighter(self) -> None:
         """
@@ -730,6 +746,7 @@ class DFoTVideo(BasePytorchAlgo):
             self._update_metrics(all_videos)
             self._update_semantic_metrics(all_videos)
             self._update_element_quality_metrics(all_videos)
+            self._update_rollout_saver(all_videos)
             self._log_videos(all_videos, namespace)
 
     def on_validation_epoch_start(self) -> None:
@@ -1178,6 +1195,28 @@ class DFoTVideo(BasePytorchAlgo):
             if self.logging.n_metrics_frames is not None:
                 context_mask = context_mask[: self.logging.n_metrics_frames]
             self.element_quality_metric.update(
+                task,
+                videos,
+                gt_videos,
+                context_mask=context_mask,
+                clip_metadata_batch=self._semantic_batch_metadata,
+            )
+
+    def _update_rollout_saver(self, all_videos: Dict[str, Tensor]) -> None:
+        """Save per-trajectory rollouts to disk when rollout_save_dir is configured."""
+        if self.rollout_saver is None or self._semantic_batch_metadata is None:
+            return
+        gt_videos = all_videos["gt"]
+        for task in self.tasks:
+            if task not in all_videos:
+                continue
+            videos = all_videos[task]
+            context_mask = torch.zeros(self.n_frames).bool().to(self.device)
+            if task == "prediction":
+                context_mask[: self.n_context_frames] = True
+            elif task == "interpolation":
+                context_mask[[0, -1]] = True
+            self.rollout_saver.update(
                 task,
                 videos,
                 gt_videos,
