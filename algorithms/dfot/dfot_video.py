@@ -101,6 +101,7 @@ class DFoTVideo(BasePytorchAlgo):
         self.num_logged_videos = 0
         self.generator = None
         self.semantic_metric = None
+        self.element_quality_metric = None
         self._semantic_batch_metadata = None
         self.element_loss_weighter = None
         self.change_mask_loss_weighter = None
@@ -178,6 +179,7 @@ class DFoTVideo(BasePytorchAlgo):
                         split_batch_size=self.logging.metrics_batch_size,
                     )
         self._build_semantic_metrics()
+        self._build_element_quality_metrics()
 
     def configure_optimizers(self):
         transition_params = list(self.diffusion_model.parameters())
@@ -250,6 +252,27 @@ class DFoTVideo(BasePytorchAlgo):
             )
         if debug_dir:
             rank_zero_print(cyan("Semantic debug images →"), debug_dir)
+
+    def _build_element_quality_metrics(self) -> None:
+        """Build element-role quality / OCR zone metrics if cache is configured."""
+        cache_dir = self.logging.get("omniparser_cache_dir", None)
+        if cache_dir is None or str(cache_dir).strip() == "":
+            return
+
+        from ui_sim.dfot_simulator.evaluation.dfot_validation_semantics import (
+            DfotElementQualityMetric,
+        )
+
+        self.element_quality_metric = DfotElementQualityMetric.from_cache_arg(
+            cache_dir,
+            ocr_cache_dir_arg=self.logging.get("ocr_cache_dir", None),
+        )
+        rank_zero_print(cyan("Element-quality validation metrics enabled:"), cache_dir)
+        if self.logging.get("ocr_cache_dir", None):
+            rank_zero_print(
+                cyan("OCR zone quality metrics enabled:"),
+                self.logging.get("ocr_cache_dir"),
+            )
 
     def _build_element_loss_weighter(self) -> None:
         """
@@ -706,6 +729,7 @@ class DFoTVideo(BasePytorchAlgo):
 
             self._update_metrics(all_videos)
             self._update_semantic_metrics(all_videos)
+            self._update_element_quality_metrics(all_videos)
             self._log_videos(all_videos, namespace)
 
     def on_validation_epoch_start(self) -> None:
@@ -730,6 +754,10 @@ class DFoTVideo(BasePytorchAlgo):
             metric_logs = self._metrics(task).log(task)
             if self.semantic_metric is not None:
                 metric_logs.update(self.semantic_metric.log_dict(task))
+            if self.element_quality_metric is not None:
+                metric_logs.update(
+                    self.element_quality_metric.log_dict(task)
+                )
             self.log_dict(
                 metric_logs,
                 on_step=False,
@@ -742,6 +770,8 @@ class DFoTVideo(BasePytorchAlgo):
             )
         if self.semantic_metric is not None:
             self.semantic_metric.reset()
+        if self.element_quality_metric is not None:
+            self.element_quality_metric.reset()
 
     def test_step(self, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
         return self.validation_step(*args, **kwargs, namespace="test")
@@ -1120,6 +1150,34 @@ class DFoTVideo(BasePytorchAlgo):
             if self.logging.n_metrics_frames is not None:
                 context_mask = context_mask[: self.logging.n_metrics_frames]
             self.semantic_metric.update(
+                task,
+                videos,
+                gt_videos,
+                context_mask=context_mask,
+                clip_metadata_batch=self._semantic_batch_metadata,
+            )
+
+    def _update_element_quality_metrics(self, all_videos: Dict[str, Tensor]) -> None:
+        """Update element-role quality / OCR zone metrics during validation/test."""
+        if self.element_quality_metric is None:
+            return
+        if self.logging.n_metrics_frames is not None:
+            all_videos = {
+                k: v[:, : self.logging.n_metrics_frames] for k, v in all_videos.items()
+            }
+
+        gt_videos = all_videos["gt"]
+        for task in self.tasks:
+            videos = all_videos[task]
+            context_mask = torch.zeros(self.n_frames).bool().to(self.device)
+            match task:
+                case "prediction":
+                    context_mask[: self.n_context_frames] = True
+                case "interpolation":
+                    context_mask[[0, -1]] = True
+            if self.logging.n_metrics_frames is not None:
+                context_mask = context_mask[: self.logging.n_metrics_frames]
+            self.element_quality_metric.update(
                 task,
                 videos,
                 gt_videos,
