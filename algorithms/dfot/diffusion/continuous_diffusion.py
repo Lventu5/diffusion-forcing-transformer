@@ -151,9 +151,11 @@ class ContinuousDiffusion(DiscreteDiffusion):
         x: torch.Tensor,
         external_cond: Optional[torch.Tensor],
         k: torch.Tensor,
+        noise: Optional[torch.Tensor] = None,
     ):
         logsnr = self.training_schedule(k)
-        noise = torch.randn_like(x)
+        if noise is None:
+            noise = torch.randn_like(x)
         noise = torch.clamp(noise, -self.clip_noise, self.clip_noise)
         alpha_t = self.add_shape_channels(torch.sigmoid(logsnr).sqrt())
         sigma_t = self.add_shape_channels(torch.sigmoid(-logsnr).sqrt())

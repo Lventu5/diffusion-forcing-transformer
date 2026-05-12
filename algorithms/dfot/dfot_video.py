@@ -106,6 +106,7 @@ class DFoTVideo(BasePytorchAlgo):
         self._semantic_batch_metadata = None
         self.element_loss_weighter = None
         self.change_mask_loss_weighter = None
+        self.negative_condition_loss = None
         self._element_spatial_weight: Optional[Tensor] = None
         self._change_mask_spatial_weight: Optional[Tensor] = None
 
@@ -148,6 +149,7 @@ class DFoTVideo(BasePytorchAlgo):
         self.register_data_mean_std(self.cfg.data_mean, self.cfg.data_std)
         self._build_element_loss_weighter()
         self._build_change_mask_loss_weighter()
+        self._build_negative_condition_loss()
 
         # 2. VAE model
         if self.is_latent_diffusion and self.is_latent_online:
@@ -351,6 +353,29 @@ class DFoTVideo(BasePytorchAlgo):
             )
         )
 
+    def _build_negative_condition_loss(self) -> None:
+        neg_cfg = getattr(self.cfg, "negative_condition_loss", None)
+        if neg_cfg is None or not getattr(neg_cfg, "enabled", False):
+            return
+
+        from ui_sim.dfot_simulator.negative_condition_loss import NegativeConditionLoss
+
+        self.negative_condition_loss = NegativeConditionLoss(
+            weight=float(getattr(neg_cfg, "weight", 0.1)),
+            margin=float(getattr(neg_cfg, "margin", 0.02)),
+            action_dims=int(getattr(neg_cfg, "action_dims", 3)),
+            shuffle_mode=str(getattr(neg_cfg, "shuffle_mode", "batch_roll")),
+            use_spatial_weights=bool(getattr(neg_cfg, "use_spatial_weights", True)),
+        )
+        rank_zero_print(
+            cyan(
+                "[negative_condition_loss] enabled — "
+                f"weight={self.negative_condition_loss.weight}, "
+                f"margin={self.negative_condition_loss.margin}, "
+                f"action_dims={self.negative_condition_loss.action_dims}"
+            )
+        )
+
     # ---------------------------------------------------------------------
     # Length-related Properties and Utils
     # NOTE: "Frame" and "Token" should be distinguished carefully.
@@ -508,10 +533,15 @@ class DFoTVideo(BasePytorchAlgo):
                     m.first_attn_weights = None
 
         noise_levels, masks = self._get_training_noise_levels(xs, masks)
+        processed_conditions = self._process_conditions(conditions)
+        shared_noise = (
+            torch.randn_like(xs) if self.negative_condition_loss is not None else None
+        )
         xs_pred, loss = self.diffusion_model(
             xs,
-            self._process_conditions(conditions),
+            processed_conditions,
             k=noise_levels,
+            noise=shared_noise,
         )
 
         if log_attn:
@@ -521,6 +551,33 @@ class DFoTVideo(BasePytorchAlgo):
                     m.store_attn_weights = False
                     m.first_attn_weights = None
                     m.last_attn_weights = None
+
+        negative_loss_result = None
+        if self.negative_condition_loss is not None:
+            negative_conditions = self.negative_condition_loss.make_negative_conditions(
+                processed_conditions
+            )
+            if negative_conditions is None:
+                negative_loss_result = self.negative_condition_loss.skipped_result(
+                    xs.device,
+                    loss.dtype,
+                )
+            else:
+                _, shuffled_loss = self.diffusion_model(
+                    xs,
+                    negative_conditions,
+                    k=noise_levels,
+                    noise=shared_noise,
+                )
+                negative_loss_result = self.negative_condition_loss(
+                    loss,
+                    shuffled_loss,
+                    masks=masks,
+                    spatial_weights=(
+                        self._element_spatial_weight,
+                        self._change_mask_spatial_weight,
+                    ),
+                )
 
         # Apply element-level spatial weight if available (set in on_after_batch_transfer).
         # loss shape: (B, T, C, H, W) — weight shape: (B, T, 1, H, W) → broadcasts over C.
@@ -549,6 +606,30 @@ class DFoTVideo(BasePytorchAlgo):
             self._change_mask_spatial_weight = None
 
         loss = self._reweight_loss(loss, masks)
+        if negative_loss_result is not None:
+            if batch_idx % self.cfg.logging.loss_freq == 0:
+                self.log(
+                    f"{namespace}/base_loss",
+                    loss,
+                    on_step=namespace == "training",
+                    on_epoch=namespace != "training",
+                    sync_dist=True,
+                )
+                self.log(
+                    f"{namespace}/negative_condition_loss",
+                    negative_loss_result.loss,
+                    on_step=namespace == "training",
+                    on_epoch=namespace != "training",
+                    sync_dist=True,
+                )
+                self.log(
+                    f"{namespace}/negative_condition_gap",
+                    negative_loss_result.gap,
+                    on_step=namespace == "training",
+                    on_epoch=namespace != "training",
+                    sync_dist=True,
+                )
+            loss = loss + negative_loss_result.loss
 
         if batch_idx % self.cfg.logging.loss_freq == 0:
             self.log(

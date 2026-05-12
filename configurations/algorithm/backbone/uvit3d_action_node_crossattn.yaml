@@ -25,6 +25,15 @@ use_checkpointing: [false, false, false, false]
 #   Qwen/Qwen3-Embedding-8B → 4096
 #   all-mpnet-base-v2       → 768
 cross_attn_context_dim: 4096
+# Graph-token layout knobs. Defaults keep the legacy pooled one-token-per-frame
+# format. For graph_tokens sidecars, set:
+#   graph_tokens_per_frame: K
+#   graph_token_dim: D
+#   graph_token_has_mask: true
+# and dataset.node_emb_dim = K*D + K.
+graph_tokens_per_frame: 1
+graph_token_dim: 4096
+graph_token_has_mask: true
 # Per-frame cross-attention: each frame's spatial tokens attend only to their own
 # frame's context token (one node embedding per frame). This prevents the attention
 # sink to position 0 that occurs without temporal positional structure (no RoPE).

@@ -353,8 +353,10 @@ class DiscreteDiffusion(nn.Module):
         x: torch.Tensor,
         external_cond: Optional[torch.Tensor],
         k: torch.Tensor,
+        noise: Optional[torch.Tensor] = None,
     ):
-        noise = torch.randn_like(x)
+        if noise is None:
+            noise = torch.randn_like(x)
         noise = torch.clamp(noise, -self.clip_noise, self.clip_noise)
 
         noised_x = self.q_sample(x_start=x, k=k, noise=noise)

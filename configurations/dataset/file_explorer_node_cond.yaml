@@ -27,9 +27,11 @@ context_length: 8
 #   Qwen/Qwen3-Embedding-8B → 4096
 #   all-mpnet-base-v2       → 768
 #   all-MiniLM-L6-v2        → 384
+# For graph_tokens layout this is packed_dim = K * token_dim + K mask bits.
 node_emb_dim: 4096
 
 # Total conditioning dimension: action (3) + node embedding (4096).
+# For graph_tokens: external_cond_dim = 3 + K * token_dim + K.
 external_cond_dim: 4099
 
 external_cond_processing: mask_first

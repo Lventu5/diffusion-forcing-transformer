@@ -143,6 +143,17 @@ change_mask_loss:
   base_weight: 1.0    # loss multiplier outside changed regions
   changed_boost: 5.0  # loss multiplier inside changed regions
 
+# Contrastive graph-conditioning loss.
+# Runs a second denoising pass with graph/node condition dims shuffled across the
+# batch while action dims stay fixed, then enforces correct-cond loss < wrong-cond loss.
+negative_condition_loss:
+  enabled: false
+  weight: 0.1
+  margin: 0.02
+  action_dims: 3
+  shuffle_mode: batch_roll
+  use_spatial_weights: true
+
 # REPAINT-style inpainting for unchanged regions.
 # At each sampling step, blends model predictions with noised reference frames
 # using change masks, preserving unchanged pixel regions.

@@ -18,6 +18,9 @@ Required backbone config keys:
 Optional config keys:
   external_cond_dropout: float  action CFG dropout probability (default 0.0)
   node_cond_dropout:     float  text CFG dropout probability   (default 0.0)
+  graph_tokens_per_frame: int    >1 for packed graph-token sidecars
+  graph_token_dim:        int    per-token embedding dim when graph_tokens_per_frame > 1
+  graph_token_has_mask:   bool   packed sidecar includes K mask bits (default true)
 """
 
 from __future__ import annotations
@@ -31,6 +34,39 @@ from torch import Tensor
 from .uvit3d_action import UViT3DAction
 from .u_vit3d import UViT3D
 from ..modules.embeddings import RandomEmbeddingDropout
+
+
+def unpack_graph_token_context(
+    node_cond: Tensor,
+    *,
+    tokens_per_frame: int,
+    token_dim: int,
+    has_mask: bool = True,
+) -> tuple[Tensor, Optional[Tensor]]:
+    """Unpack ``[K*D flattened tokens | K mask]`` into cross-attn context."""
+    if tokens_per_frame <= 1:
+        return node_cond, None
+
+    token_values_dim = tokens_per_frame * token_dim
+    expected_dim = token_values_dim + (tokens_per_frame if has_mask else 0)
+    if node_cond.shape[-1] != expected_dim:
+        raise ValueError(
+            "Graph-token condition dim mismatch: "
+            f"got {node_cond.shape[-1]}, expected {expected_dim} "
+            f"(K={tokens_per_frame}, D={token_dim}, mask={has_mask})."
+        )
+
+    B, T = node_cond.shape[:2]
+    tokens = node_cond[..., :token_values_dim].reshape(
+        B,
+        T * tokens_per_frame,
+        token_dim,
+    )
+    if not has_mask:
+        return tokens, None
+
+    mask = node_cond[..., token_values_dim:].reshape(B, T * tokens_per_frame)
+    return tokens, mask > 0.5
 
 
 class UViT3DActionNodeCrossAttn(UViT3DAction):
@@ -65,6 +101,13 @@ class UViT3DActionNodeCrossAttn(UViT3DAction):
                 f"Set dataset.external_cond_dim = 3 + <node_emb_dim>."
             )
         self._node_emb_dim = node_emb_dim
+        self._graph_tokens_per_frame = int(cfg.get("graph_tokens_per_frame", 1))
+        self._graph_token_dim = int(cfg.get("graph_token_dim", node_emb_dim))
+        self._graph_token_has_mask = bool(cfg.get("graph_token_has_mask", True))
+        if self._graph_tokens_per_frame <= 0:
+            raise ValueError("graph_tokens_per_frame must be >= 1")
+        if self._graph_tokens_per_frame == 1:
+            self._graph_token_dim = node_emb_dim
 
         # Pass the full external_cond_dim up so BaseBackbone stores it, but
         # UViT3DAction._build_external_cond_embedding builds an ActionCondEmbedding
@@ -99,16 +142,23 @@ class UViT3DActionNodeCrossAttn(UViT3DAction):
             (B, T, C, H, W)
         """
         context_tokens = None
+        context_mask = None
         if external_cond is not None:
             action_cond = external_cond[..., : self._ACTION_DIMS]   # (B, T, 3)
             node_emb    = external_cond[..., self._ACTION_DIMS :]   # (B, T, node_emb_dim)
+            context_tokens, context_mask = unpack_graph_token_context(
+                node_emb.float(),
+                tokens_per_frame=self._graph_tokens_per_frame,
+                token_dim=self._graph_token_dim,
+                has_mask=self._graph_token_has_mask,
+            )
 
             # Independent dropout: use node_cond_mask if provided, else fall back to
             # external_cond_mask (backward-compatible joint drop).
             context_tokens = self._node_dropout(
-                node_emb.float(),
+                context_tokens,
                 node_cond_mask if node_cond_mask is not None else external_cond_mask,
-            )  # (B, T, node_emb_dim)
+            )  # (B, T*K, graph_token_dim) or legacy (B, T, node_emb_dim)
 
             external_cond = action_cond
 
@@ -119,6 +169,7 @@ class UViT3DActionNodeCrossAttn(UViT3DAction):
                 var_across_t = context_tokens.std(dim=1).mean().item()
                 print(
                     f"[ctx-check] context_tokens: shape={tuple(context_tokens.shape)} "
+                    f"mask_shape={None if context_mask is None else tuple(context_mask.shape)} "
                     f"mean={context_tokens.mean().item():.4f} "
                     f"std={context_tokens.std().item():.4f} "
                     f"std_across_T={var_across_t:.4f} "
@@ -137,5 +188,5 @@ class UViT3DActionNodeCrossAttn(UViT3DAction):
             external_cond=external_cond,
             external_cond_mask=external_cond_mask,
             context_tokens=context_tokens,
-            context_mask=None,
+            context_mask=context_mask,
         )
