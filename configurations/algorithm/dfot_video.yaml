@@ -114,6 +114,12 @@ logging:
   ocr_cache_dir: null # Optional PaddleOCR cache for high-weight text metrics during validation
   ocr_text_weight: 5.0
   ocr_min_confidence: 0.5
+  # Cross-attention diagnostics. When enabled, logs W&B heatmaps during training
+  # every cross_attn_map_freq steps and on the first validation/test batch.
+  # For graph-token conditioning, heatmap rows are frames and columns are token slots.
+  cross_attn_maps: false
+  cross_attn_map_freq: 500
+  cross_attn_map_max_blocks: 4
 
 # Element-level spatial loss weighting.
 # Up-weights MSE loss inside OmniParser-detected UI element bounding boxes.

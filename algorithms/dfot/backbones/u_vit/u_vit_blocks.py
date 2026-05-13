@@ -207,6 +207,9 @@ class CrossAttnBlock(nn.Module):
         self.store_attn_weights: bool = False
         self.first_attn_weights: Optional[Tensor] = None  # (B, heads, N, M) – first step
         self.last_attn_weights: Optional[Tensor] = None   # (B, heads, N, M) – last step
+        self.last_attn_frame_aligned: bool = False
+        self.last_attn_t_seq: int = 0
+        self.last_attn_context_tokens_per_frame: int = 0
 
         if not self.frame_aligned and self.t_seq <= 0:
             raise ValueError(
@@ -286,6 +289,9 @@ class CrossAttnBlock(nn.Module):
                     B * T, context_tokens_per_frame
                 )
             is_causal = False  # per-frame routing already enforces temporal alignment
+        else:
+            T = self.t_seq
+            context_tokens_per_frame = context.shape[1] // max(T, 1) if T > 0 else context.shape[1]
 
         x = self.norm(x)
         context = self.context_norm(context)
@@ -322,10 +328,7 @@ class CrossAttnBlock(nn.Module):
         elif context_mask is not None:
             attn_mask = ~context_mask[:, None, None, :]
 
-        if self.store_attn_weights and not self.frame_aligned:
-            # Weight capture only makes sense in the full-context (non-frame-aligned) path
-            # where the (N_query × T_context) map carries information. In frame_aligned mode
-            # there is always exactly one context token per frame, so attention = 1.0 trivially.
+        if self.store_attn_weights:
             scale = q.shape[-1] ** -0.5
             scores = torch.matmul(q.float(), k.float().transpose(-2, -1)) * scale
             if attn_mask is not None:
@@ -335,6 +338,9 @@ class CrossAttnBlock(nn.Module):
             if self.first_attn_weights is None:
                 self.first_attn_weights = attn_w_cpu
             self.last_attn_weights = attn_w_cpu
+            self.last_attn_frame_aligned = self.frame_aligned
+            self.last_attn_t_seq = int(T)
+            self.last_attn_context_tokens_per_frame = int(context_tokens_per_frame)
             x = torch.matmul(attn_w, v.float()).to(q.dtype)
         else:
             # pylint: disable-next=not-callable

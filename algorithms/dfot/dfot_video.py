@@ -1,5 +1,6 @@
 from typing import Optional, Any, Dict, List, Literal, Callable, Tuple
 from functools import partial
+from pathlib import Path
 from omegaconf import DictConfig
 import numpy as np
 import torch
@@ -103,6 +104,7 @@ class DFoTVideo(BasePytorchAlgo):
         self.semantic_metric = None
         self.element_quality_metric = None
         self.rollout_saver = None
+        self._attn_batch_metadata = None
         self._semantic_batch_metadata = None
         self.element_loss_weighter = None
         self.change_mask_loss_weighter = None
@@ -454,6 +456,7 @@ class DFoTVideo(BasePytorchAlgo):
         """
         if self.semantic_metric is not None:
             self._semantic_batch_metadata = batch.get("clip_metadata")
+        self._attn_batch_metadata = batch.get("clip_metadata")
 
         # 1. Tokenize the videos and optionally prepare the ground truth videos
         gt_videos = None
@@ -520,12 +523,7 @@ class DFoTVideo(BasePytorchAlgo):
         """Training step"""
         xs, conditions, masks, *_ = batch
 
-        log_attn = (
-            is_rank_zero
-            and self.logger
-            and self.cfg.logging.grad_norm_freq
-            and self.global_step % self.cfg.logging.grad_norm_freq == 0
-        )
+        log_attn = self._should_log_cross_attn(batch_idx, namespace)
         if log_attn:
             for m in self.diffusion_model.modules():
                 if m.__class__.__name__ == "CrossAttnBlock":
@@ -807,7 +805,7 @@ class DFoTVideo(BasePytorchAlgo):
         if not (
             self.trainer.sanity_checking and not self.cfg.logging.sanity_generation
         ):
-            log_attn = is_rank_zero and self.logger and batch_idx == 0
+            log_attn = self._should_log_cross_attn(batch_idx, namespace)
             if log_attn:
                 for m in self.diffusion_model.modules():
                     if m.__class__.__name__ == "CrossAttnBlock":
@@ -1349,10 +1347,88 @@ class DFoTVideo(BasePytorchAlgo):
 
         self.num_logged_videos += batch_size
 
+    def _should_log_cross_attn(self, batch_idx: int, namespace: str) -> bool:
+        if not (is_rank_zero and self.logger):
+            return False
+        if not bool(self.cfg.logging.get("cross_attn_maps", False)):
+            return False
+        if namespace == "training":
+            freq = int(self.cfg.logging.get("cross_attn_map_freq", 100) or 0)
+            return freq > 0 and self.global_step % freq == 0
+        return batch_idx == 0
+
+    @staticmethod
+    def _first_metadata_value(value, default=None):
+        if value is None:
+            return default
+        if torch.is_tensor(value):
+            if value.ndim == 0:
+                return value.item()
+            return value[0].item()
+        if isinstance(value, (list, tuple)):
+            return value[0] if value else default
+        return value
+
+    def _first_clip_graph_token_labels(
+        self,
+        t_seq: int,
+        tokens_per_frame: int,
+    ) -> Optional[List[List[str]]]:
+        metadata = self._attn_batch_metadata
+        if not isinstance(metadata, dict):
+            return None
+
+        video_path = self._first_metadata_value(metadata.get("video_path"))
+        if not video_path:
+            return None
+
+        start_frame = int(self._first_metadata_value(metadata.get("start_frame"), 0))
+        frame_skip = int(self._first_metadata_value(metadata.get("frame_skip"), 1))
+        path = Path(str(video_path))
+        token_path = path.with_name(f"{path.stem}_node_tokens.json")
+        if not token_path.exists():
+            return None
+
+        try:
+            import json
+
+            payload = json.loads(token_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+        frames = payload.get("frames")
+        if not isinstance(frames, list):
+            return None
+
+        labels: List[List[str]] = []
+        for frame_idx in range(t_seq):
+            source_idx = start_frame + frame_idx * frame_skip
+            tokens = frames[source_idx] if 0 <= source_idx < len(frames) else []
+            if not isinstance(tokens, list):
+                tokens = []
+            row = [str(token) for token in tokens[:tokens_per_frame]]
+            if len(row) < tokens_per_frame:
+                row.extend(f"<pad:{slot}>" for slot in range(len(row), tokens_per_frame))
+            labels.append(row)
+        return labels
+
+    @staticmethod
+    def _cross_attn_top_token_table(wandb, slot_attn, labels):
+        table = wandb.Table(columns=["frame", "rank", "slot", "weight", "token"])
+        for frame_idx, row in enumerate(slot_attn):
+            top_slots = np.argsort(-row)[: min(5, row.shape[0])]
+            for rank, slot in enumerate(top_slots, start=1):
+                token = labels[frame_idx][slot] if labels is not None else f"slot {slot}"
+                table.add_data(frame_idx, rank, int(slot), float(row[slot]), str(token)[:200])
+        return table
+
     def _log_cross_attn_map(self, namespace: str) -> None:
         """
-        Log a temporal attention heatmap: (T_query × T_context) showing how
-        strongly each video frame attends to each map-crop time step.
+        Log cross-attention heatmaps.
+
+        For graph-token frame-aligned conditioning, each row is a video frame and
+        each column is one graph-token slot within that same frame. For legacy
+        non-frame-aligned conditioning, rows/cols are query/context time steps.
 
         Weights are captured during the validation_step forward passes
         (store_attn_weights was enabled before super() was called).
@@ -1370,7 +1446,7 @@ class DFoTVideo(BasePytorchAlgo):
         if not cross_attn_blocks:
             return
 
-        def _make_heat(weights):
+        def _make_legacy_temporal_heat(weights):
             """weights: (B, heads, N_query, N_context) CPU tensor → uint8 (T, T) numpy."""
             attn = weights[0].mean(0)  # (N_query, N_context)
             n_query, n_context = attn.shape
@@ -1391,17 +1467,71 @@ class DFoTVideo(BasePytorchAlgo):
                 return None
             return (attn_tt / mx * 255).astype(np.uint8)
 
+        def _make_frame_slot_heat(weights, blk):
+            """Return (uint8 heat, float heat) for frame-aligned graph-token attention."""
+            if not getattr(blk, "last_attn_frame_aligned", False):
+                return None, None
+            t_seq = int(getattr(blk, "last_attn_t_seq", 0))
+            tokens_per_frame = int(
+                getattr(blk, "last_attn_context_tokens_per_frame", 0)
+            )
+            if t_seq <= 0 or tokens_per_frame <= 0:
+                return None, None
+            if weights.shape[0] < t_seq or weights.shape[-1] != tokens_per_frame:
+                return None, None
+            # Stored frame-aligned shape: (B*T, heads, query_tokens_per_frame, K).
+            slot_attn = weights[:t_seq].mean(dim=(1, 2)).float().numpy()
+            row_sum = slot_attn.sum(axis=1, keepdims=True) + 1e-8
+            slot_attn = slot_attn / row_sum
+            mx = slot_attn.max()
+            if mx < 1e-8 or np.isnan(mx):
+                return None, None
+            return (slot_attn / mx * 255).astype(np.uint8), slot_attn
+
+        max_blocks = int(self.cfg.logging.get("cross_attn_map_max_blocks", 4) or 0)
+        label_cache: Dict[Tuple[int, int], Optional[List[List[str]]]] = {}
         images = {}
         for i, blk in enumerate(cross_attn_blocks):
+            if max_blocks > 0 and i >= max_blocks:
+                break
             for tag, weights in (("last", blk.last_attn_weights), ("first", blk.first_attn_weights)):
                 if weights is None:
                     continue
-                heat = _make_heat(weights)
-                if heat is None:
+                heat, slot_attn = _make_frame_slot_heat(weights, blk)
+                if heat is not None:
+                    t_seq = int(getattr(blk, "last_attn_t_seq", heat.shape[0]))
+                    tokens_per_frame = int(
+                        getattr(blk, "last_attn_context_tokens_per_frame", heat.shape[1])
+                    )
+                    key = (t_seq, tokens_per_frame)
+                    if key not in label_cache:
+                        label_cache[key] = self._first_clip_graph_token_labels(
+                            t_seq,
+                            tokens_per_frame,
+                        )
+                    labels = label_cache[key]
+                    images[f"{namespace}/cross_attn_block{i}_{tag}step_slots"] = wandb.Image(
+                        heat,
+                        caption=(
+                            f"Block {i} {tag} denoising step: "
+                            "rows=video frames, cols=graph-token slots"
+                        ),
+                    )
+                    if slot_attn is not None:
+                        images[f"{namespace}/cross_attn_block{i}_{tag}step_top_tokens"] = (
+                            self._cross_attn_top_token_table(wandb, slot_attn, labels)
+                        )
                     continue
-                images[f"{namespace}/cross_attn_block{i}_{tag}step"] = wandb.Image(
-                    heat, caption=f"Block {i} {tag} denoising step: rows=query time, cols=context time"
-                )
+
+                heat = _make_legacy_temporal_heat(weights)
+                if heat is not None:
+                    images[f"{namespace}/cross_attn_block{i}_{tag}step"] = wandb.Image(
+                        heat,
+                        caption=(
+                            f"Block {i} {tag} denoising step: "
+                            "rows=query time, cols=context time"
+                        ),
+                    )
 
         if images:
             self.logger.experiment.log(images, step=self.global_step)
