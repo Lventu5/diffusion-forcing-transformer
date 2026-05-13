@@ -77,6 +77,10 @@ checkpoint:
 # Set cross_attn_only_steps: 0 to disable (standard training, all params always unfrozen).
 freeze_schedule:
   cross_attn_only_steps: 0
+  # Keep zero-init cross-attention as an initial no-op by default. Setting this
+  # above 0 makes fresh cross-attn active before it has learned, which can be
+  # unstable for large graph-token contexts.
+  cross_attn_out_init_std: 0.0
 
 # video generation tasks
 tasks:

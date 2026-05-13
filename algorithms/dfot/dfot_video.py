@@ -719,6 +719,12 @@ class DFoTVideo(BasePytorchAlgo):
                     return False
         return True
 
+    def _cross_attn_out_init_std(self) -> float:
+        sched = getattr(self.cfg, "freeze_schedule", None)
+        if sched is None:
+            return 0.0
+        return float(getattr(sched, "cross_attn_out_init_std", 0.0) or 0.0)
+
     def _reinit_cross_attn_out(self) -> None:
         """Re-initialize cross-attention output projections from zero to a small
         normal distribution, enabling gradient flow to Q/K/V from training step 1.
@@ -726,22 +732,30 @@ class DFoTVideo(BasePytorchAlgo):
         Background: zero_module() zeros the output projection so that cross-attention
         starts as a no-op. With frame_aligned=False (non-trivial softmax over T keys),
         grad_input = grad_output @ W_out.T = 0 when W_out = 0, so Q/K/V receive zero
-        gradients at step 0. Reinitializing W_out to N(0, 0.01) unblocks gradient flow
-        while keeping the initial cross-attention contribution small (output noise per
-        element ≈ 0.01 × sqrt(dim) — much smaller than activations, safe with frozen backbone).
+        gradients at step 0. A positive cross_attn_out_init_std unblocks that flow,
+        but the default keeps the zero-init no-op because large graph-token contexts
+        can make random cross-attention numerically unstable before learning starts.
         """
+        init_std = self._cross_attn_out_init_std()
+        if init_std <= 0.0:
+            rank_zero_print(
+                "[freeze_schedule] cross_attn.out.weight is zero-init and "
+                "cross_attn_out_init_std<=0, so keeping cross-attn as an initial no-op."
+            )
+            return
+
         n_reinit = 0
         for name, param in self.diffusion_model.named_parameters():
             if "cross_attn" not in name:
                 continue
             if name.endswith(".out.weight"):
-                torch.nn.init.normal_(param, std=0.01)
+                torch.nn.init.normal_(param, std=init_std)
                 n_reinit += 1
             elif name.endswith(".out.bias"):
                 torch.nn.init.zeros_(param)
         rank_zero_print(
             f"[freeze_schedule] Re-initialized {n_reinit} cross_attn.out.weight "
-            f"tensors from zero to N(0, 0.01) to unblock Q/K/V gradient flow."
+            f"tensors from zero to N(0, {init_std:g}) to unblock Q/K/V gradient flow."
         )
 
     def configure_model(self) -> None:
