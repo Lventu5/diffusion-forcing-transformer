@@ -1576,6 +1576,7 @@ class DFoTVideo(BasePytorchAlgo):
             case "mask_first":
                 mask = torch.ones_like(conditions)
                 mask[:, :1, : self.external_cond_dim] = 0
+                self._preserve_graph_token_mask_bits(mask)
                 return conditions * mask
             case None | "none":
                 return conditions
@@ -1583,6 +1584,36 @@ class DFoTVideo(BasePytorchAlgo):
                 raise NotImplementedError(
                     f"External condition processing {self.cfg.external_cond_processing} is not implemented."
                 )
+
+    def _preserve_graph_token_mask_bits(self, mask: Tensor) -> None:
+        """Keep packed graph-token validity bits when masking condition values.
+
+        ``mask_first`` zeroes condition values for the first frame. In graph-token
+        layout the final K dimensions are validity bits, not conditioning values.
+        Zeroing them creates all-masked cross-attention rows.
+        """
+        backbone_cfg = getattr(self.cfg, "backbone", None)
+        if backbone_cfg is None:
+            return
+        tokens_per_frame = int(getattr(backbone_cfg, "graph_tokens_per_frame", 1) or 1)
+        has_mask = bool(getattr(backbone_cfg, "graph_token_has_mask", False))
+        if tokens_per_frame <= 1 or not has_mask:
+            return
+
+        action_dims = 3
+        token_dim = int(getattr(backbone_cfg, "graph_token_dim", 0) or 0)
+        if token_dim <= 0:
+            node_dim = self.external_cond_dim - action_dims
+            token_dim = (node_dim - tokens_per_frame) // tokens_per_frame
+        mask_start = action_dims + tokens_per_frame * token_dim
+        mask_end = mask_start + tokens_per_frame
+        max_condition_dim = min(self.external_cond_dim, mask.shape[-1])
+        if mask_start < action_dims or mask_end > max_condition_dim:
+            raise ValueError(
+                "Graph-token condition dimensions are inconsistent with the configured "
+                f"K={tokens_per_frame}, D={token_dim}, external_cond_dim={self.external_cond_dim}."
+            )
+        mask[:, :1, mask_start:mask_end] = 1
 
     # ---------------------------------------------------------------------
     # Training Utils

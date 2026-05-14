@@ -66,7 +66,27 @@ def unpack_graph_token_context(
         return tokens, None
 
     mask = node_cond[..., token_values_dim:].reshape(B, T * tokens_per_frame)
-    return tokens, mask > 0.5
+    context_mask = mask > 0.5
+
+    # A fully zero packed row is the graph-token representation of "no node
+    # condition" after padding, context masking, or CFG-style zeroing. Cross
+    # attention still needs one valid key/value slot; use slot 0 as a null token.
+    frame_tokens = tokens.reshape(B, T, tokens_per_frame, token_dim)
+    frame_mask = context_mask.reshape(B, T, tokens_per_frame)
+    empty_frames = ~frame_mask.any(dim=-1)
+    if empty_frames.any():
+        frame_has_values = frame_tokens.abs().sum(dim=(-1, -2)) > 0
+        inconsistent = empty_frames & frame_has_values
+        if inconsistent.any():
+            raise ValueError(
+                "Graph-token condition contains non-zero token values but no valid mask bits. "
+                "Check packed node embedding sidecars and graph_token_has_mask."
+            )
+        frame_mask = frame_mask.clone()
+        frame_mask[..., 0] |= empty_frames
+        context_mask = frame_mask.reshape(B, T * tokens_per_frame)
+
+    return tokens, context_mask
 
 
 class UViT3DActionNodeCrossAttn(UViT3DAction):
